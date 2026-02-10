@@ -57,13 +57,20 @@ async def setup_listeners(user_client, bot_client):
     # 用户客户端监听器 - 使用过滤器，避免处理机器人消息
     @user_client.on(events.NewMessage(func=not_from_bot))
     async def user_message_handler(event):
-        await handle_user_message(event, user_client, bot_client)
+        try:
+            # 使用 create_task 进行并发处理，避免阻塞事件循环
+            asyncio.create_task(handle_user_message(event, user_client, bot_client))
+        except Exception as e:
+            logger.error(f"创建用户消息处理任务失败: {e}")
     
     # 机器人客户端监听器 - 使用过滤器
     @bot_client.on(events.NewMessage(func=not_from_bot))
     async def bot_message_handler(event):
-        # logger.info(f"机器人收到非自身消息, 发送者ID: {event.sender_id}")
-        await handle_bot_message(event, bot_client)
+        try:
+            # logger.info(f"机器人收到非自身消息, 发送者ID: {event.sender_id}")
+            asyncio.create_task(handle_bot_message(event, bot_client))
+        except Exception as e:
+            logger.error(f"创建机器人消息处理任务失败: {e}")
         
     # 注册机器人回调处理器
     bot_client.add_event_handler(bot_handler.callback_handler)
