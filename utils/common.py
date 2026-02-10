@@ -490,7 +490,7 @@ async def process_blacklist_mode(rule, message_text, reverse_whitelist):
 
 async def check_keyword_match(keyword, message_text):
     """检查单个关键词是否匹配"""
-    logger.info(f"检查关键字: {keyword.keyword} (正则: {keyword.is_regex})")
+    # logger.info(f"检查关键字: {keyword.keyword} (正则: {keyword.is_regex})")
     if keyword.is_regex:
         try:
             if re.search(keyword.keyword, message_text):
