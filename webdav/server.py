@@ -153,6 +153,8 @@ class _AccountProvider(TelegramDAVProvider):
         chat_id = int(account.chat_id)
         client = self.user_client
 
+        logger.info(f"WebDAV 请求: path={path!r} chat_id={chat_id}")
+
         # 根据账号缓存文件列表
         if chat_id not in self._cache:
             logger.info(f"WebDAV 扫描聊天 {chat_id} 的媒体文件...")
@@ -174,6 +176,7 @@ class _AccountProvider(TelegramDAVProvider):
         files = self._cache[chat_id]
 
         if path == '/' or path == '':
+            logger.info(f"WebDAV 返回根目录 ({len(files)} 个文件)")
             name_map = {name: msg for name, msg in files}
             return TelegramDAVRoot('/', environ, [
                 TelegramDAVFile(f'/{name}', environ, msg, client, chat_id, name)
@@ -184,6 +187,8 @@ class _AccountProvider(TelegramDAVProvider):
         for n, msg in files:
             if n == name:
                 return TelegramDAVFile(path, environ, msg, client, chat_id, name)
+
+        logger.warning(f"WebDAV 文件未找到: {path!r}")
         return None
 
 
