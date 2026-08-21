@@ -13,6 +13,37 @@ from wsgidav import dav_provider, dav_error
 logger = logging.getLogger(__name__)
 access_logger = logging.getLogger('webdav.access')
 
+# 由 server.py 在启动时设置，供 _run_async 使用
+_main_loop = None
+
+
+def set_main_loop(loop):
+    global _main_loop
+    _main_loop = loop
+
+
+def _run_async(client, coro_factory, timeout=120):
+    """在 client 所在的事件循环上运行协程，返回结果。"""
+    import asyncio
+    loop = None
+    # 优先使用存储的主循环
+    if _main_loop is not None:
+        loop = _main_loop
+    elif hasattr(client, 'loop') and client.loop:
+        loop = client.loop
+    if loop is None:
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+    coro = coro_factory()
+    if loop.is_running():
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result(timeout=timeout)
+    else:
+        return loop.run_until_complete(coro)
+
 
 def _get_filename(msg: Message, fallback_idx: int) -> str:
     """从消息中提取文件名，提取不到则生成一个。"""
@@ -32,45 +63,91 @@ def _get_filename(msg: Message, fallback_idx: int) -> str:
 
 def _iter_media_messages(client, chat_id: int) -> List[Message]:
     """迭代聊天中所有带媒体的消息，返回列表。"""
-    messages = []
     try:
-        # 使用同步方式获取（wsgidav 是同步的）
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            async def _fetch():
+        def _fetch():
+            async def _inner():
                 msgs = []
                 async for msg in client.iter_messages(chat_id, limit=1000):
                     if msg.media and not hasattr(msg, 'action'):
                         msgs.append(msg)
                 return msgs
-            messages = loop.run_until_complete(_fetch())
-        finally:
-            loop.close()
+            return _inner()
+        return _run_async(client, _fetch, timeout=60)
     except Exception as e:
         logger.error(f"获取聊天消息失败: {e}")
-    return messages
+        return []
+
+
+class _WriteBuffer:
+    """写入缓冲区，close 后仍可读取数据。"""
+    def __init__(self):
+        self._data = b''
+        self._closed = False
+
+    def write(self, data):
+        if self._closed:
+            raise ValueError("write to closed buffer")
+        self._data += data
+        return len(data)
+
+    def close(self):
+        self._closed = True
+
+    def getvalue(self):
+        return self._data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
 
 
 class TelegramDAVFile(dav_provider.DAVNonCollection):
-    """单个文件资源"""
+    """单个文件资源。支持 Telethon Message 对象和 Bot API 字典两种数据源。"""
 
-    def __init__(self, path, environ, msg: Message, client, chat_id: int, filename: str):
+    def __init__(self, path, environ, msg, client, chat_id: int, filename: str,
+                 bot_token=None, api_base_url=None):
         super().__init__(path, environ)
         self.msg = msg
         self.client = client
         self.chat_id = chat_id
         self._filename = filename
-        self._content = None  # 按需加载
+        self._content = None
+        self._bot_token = bot_token
+        self._api_base_url = api_base_url
+        self._is_bot_api = isinstance(msg, dict)
+
+    def _bot_req(self, method, params=None, files=None, json=None):
+        """发送 Bot API HTTP 请求。"""
+        import httpx
+        url = f"{self._api_base_url.rstrip('/')}/bot{self._bot_token}/{method}"
+        kwargs = {'timeout': 120}
+        if params:
+            kwargs['params'] = params
+        if files:
+            kwargs['files'] = files
+        if json:
+            kwargs['json'] = json
+        resp = httpx.post(url, **kwargs)
+        resp.raise_for_status()
+        return resp.json()
 
     def get_content_length(self):
+        if self._is_bot_api:
+            return self.msg.get('file_size', 0)
+        if not self.msg or not self.msg.media:
+            return 0
         media = self.msg.media
         if isinstance(media, MessageMediaDocument):
             return media.document.size
-        return 0  # 图片大小未知
+        return 0
 
     def get_content_type(self):
+        if self._is_bot_api:
+            return self.msg.get('mime_type', 'application/octet-stream')
+        if not self.msg or not self.msg.media:
+            return 'application/octet-stream'
         media = self.msg.media
         if isinstance(media, MessageMediaDocument):
             return media.document.mime_type or 'application/octet-stream'
@@ -79,87 +156,137 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         return 'application/octet-stream'
 
     def get_creation_date(self):
-        return self.msg.date.timestamp() if self.msg.date else 0
+        if self._is_bot_api:
+            return self.msg.get('date', 0)
+        return self.msg.date.timestamp() if self.msg and self.msg.date else 0
 
     def get_last_modified(self):
-        return self.msg.date.timestamp() if self.msg.date else 0
+        return self.get_creation_date()
 
     def get_display_name(self):
         return self._filename
 
     def get_etag(self):
-        return f'"{self.msg.id}"'
+        if self._is_bot_api:
+            return f'"{self.msg.get("message_id", 0)}"'
+        return f'"{self.msg.id}"' if self.msg else f'"{self._filename}"'
+
+    def support_etag(self):
+        return True
 
     def get_content(self):
         """下载文件内容"""
-        if self._content is None:
-            import asyncio
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        if not self.msg:
+            return io.BytesIO()
+        if self._content is not None:
+            return io.BytesIO(self._content)
+
+        if self._is_bot_api and self._api_base_url and self._bot_token:
+            # Bot API 下载：getFile -> 获取文件路径 -> 下载
             try:
-                async def _download():
-                    data = await self.client.download_media(self.msg, bytes)
-                    return data
-                self._content = loop.run_until_complete(_download())
+                file_id = self.msg.get('file_id')
+                if not file_id:
+                    return io.BytesIO()
+                data = self._bot_req('getFile', params={'file_id': file_id})
+                if not data.get('ok'):
+                    return io.BytesIO()
+                file_path = data['result']['file_path']
+                dl_url = f"{self._api_base_url.rstrip('/')}/file/bot{self._bot_token}/{file_path}"
+                import httpx
+                resp = httpx.get(dl_url, timeout=120)
+                resp.raise_for_status()
+                self._content = resp.content
+                access_logger.info(f"下载文件 {self._filename} ({len(self._content)} 字节) (via Bot API)")
+            except Exception as e:
+                logger.error(f"下载文件 {self._filename} 失败: {e}")
+                raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR, str(e))
+        else:
+            # Telethon 下载
+            try:
+                def _fetch():
+                    async def _inner():
+                        return await self.client.download_media(self.msg, bytes)
+                    return _inner()
+                self._content = _run_async(self.client, _fetch)
                 access_logger.info(f"下载文件 {self._filename} ({len(self._content)} 字节)")
             except Exception as e:
                 logger.error(f"下载文件 {self._filename} 失败: {e}")
                 raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR, str(e))
-            finally:
-                loop.close()
         return io.BytesIO(self._content) if self._content else io.BytesIO()
 
     def begin_write(self, content_type=None):
         """上传文件"""
-        self._upload_buffer = io.BytesIO()
+        self._upload_buffer = _WriteBuffer()
         return self._upload_buffer
 
     def end_write(self, with_errors):
         """完成上传，发送到 Telegram"""
         if with_errors or not hasattr(self, '_upload_buffer'):
             return
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         try:
             data = self._upload_buffer.getvalue()
-            async def _upload():
-                await self.client.send_file(
-                    self.chat_id,
-                    data,
-                    file_name=self._filename,
-                )
-            loop.run_until_complete(_upload())
-            access_logger.info(f"上传文件 {self._filename} ({len(data)} 字节) 到聊天 {self.chat_id}")
+            if self._api_base_url and self._bot_token:
+                # Bot API 上传
+                url = f"{self._api_base_url.rstrip('/')}/bot{self._bot_token}/sendDocument"
+                import httpx
+                files = {'document': (self._filename, data)}
+                resp = httpx.post(url, files=files, timeout=120)
+                resp.raise_for_status()
+                access_logger.info(f"上传文件 {self._filename} ({len(data)} 字节) (via Bot API)")
+            else:
+                # Telethon 上传
+                def _upload():
+                    async def _inner():
+                        await self.client.send_file(
+                            self.chat_id,
+                            data,
+                            file_name=self._filename,
+                        )
+                    return _inner()
+                _run_async(self.client, _upload)
+                access_logger.info(f"上传文件 {self._filename} ({len(data)} 字节)")
         except Exception as e:
             logger.error(f"上传文件 {self._filename} 失败: {e}")
             raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR, str(e))
-        finally:
-            loop.close()
 
     def delete(self):
         """删除文件（从聊天中删除对应消息）"""
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        if not self.msg:
+            return
         try:
-            async def _delete():
-                await self.client.delete_messages(self.chat_id, [self.msg.id], revoke=True)
-            loop.run_until_complete(_delete())
-            access_logger.info(f"删除文件 {self._filename} (消息ID {self.msg.id})")
+            if self._is_bot_api and self._api_base_url and self._bot_token:
+                # Bot API 删除
+                msg_id = self.msg.get('message_id')
+                chat_id = self.msg.get('chat_id') or self.chat_id
+                self._bot_req('deleteMessage', json={
+                    'chat_id': int(chat_id),
+                    'message_id': msg_id,
+                })
+                access_logger.info(f"删除文件 {self._filename} (消息ID {msg_id}) (via Bot API)")
+            else:
+                # Telethon 删除
+                def _del():
+                    async def _inner():
+                        await self.client.delete_messages(self.chat_id, [self.msg.id], revoke=True)
+                    return _inner()
+                _run_async(self.client, _del)
+                access_logger.info(f"删除文件 {self._filename} (消息ID {self.msg.id})")
         except Exception as e:
             logger.error(f"删除文件 {self._filename} 失败: {e}")
             raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR, str(e))
-        finally:
-            loop.close()
 
 
 class TelegramDAVRoot(dav_provider.DAVCollection):
     """根目录资源，列出所有媒体文件"""
 
-    def __init__(self, path, environ, files: List[TelegramDAVFile]):
+    def __init__(self, path, environ, files: List[TelegramDAVFile], client=None, chat_id=None,
+                 bot_token=None, api_base_url=None):
         super().__init__(path, environ)
         self._files = files
+        self._client = client or (files[0].client if files else None)
+        self._chat_id = chat_id or (files[0].chat_id if files else 0)
+        self._bot_token = bot_token
+        self._api_base_url = api_base_url
         self._name_map = {}
         # 处理同名文件，添加序号
         name_counts = {}
@@ -194,6 +321,15 @@ class TelegramDAVRoot(dav_provider.DAVCollection):
                 f'/{name}', self.environ, f.msg, f.client, f.chat_id, name
             ))
         return result
+
+    def create_empty_resource(self, name):
+        """创建空资源（PUT 上传时调用）"""
+        access_logger.info(f"创建文件 /{name}")
+        return TelegramDAVFile(
+            f'/{name}', self.environ, None, self._client, self._chat_id, name,
+            bot_token=self._bot_token,
+            api_base_url=self._api_base_url,
+        )
 
 
 class TelegramDAVProvider(dav_provider.DAVProvider):
