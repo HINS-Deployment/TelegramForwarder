@@ -91,9 +91,6 @@ class _WebDAVServer:
             config = {
                 'host': WEBDAV_HOST,
                 'port': WEBDAV_PORT,
-                'provider_mount': {
-                    '/': _AccountProvider(self.user_client, self.bot_client),
-                },
                 'http_authenticator': {
                     'accept_basic': False,
                     'accept_digest': False,
@@ -110,8 +107,10 @@ class _WebDAVServer:
                     'rename_as_move': False,
                 },
             }
-            # 用自定义认证中间件包裹 WsgiDAVApp（不通过 middleware_stack，它只接受 BaseMiddleware 子类）
-            return AuthMiddleware(WsgiDAVApp(config))
+            app = WsgiDAVApp(config)
+            # 直接设置 provider，不走 provider_mount 配置
+            app.provider = _AccountProvider(self.user_client, self.bot_client)
+            return AuthMiddleware(app)
 
         def _run():
             try:
