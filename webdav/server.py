@@ -66,6 +66,8 @@ class AuthMiddleware:
             session.close()
 
         environ['webdav.account'] = account
+        # 同时设置 REMOTE_USER，让 WsgiDAVApp 内部认证通过
+        environ['REMOTE_USER'] = account.username
         return self.app(environ, start_response)
 
 
@@ -92,9 +94,10 @@ class _WebDAVServer:
                     '/': _AccountProvider(self.user_client, self.bot_client),
                 },
                 'http_authenticator': {
-                    'accept_basic': True,
+                    'accept_basic': False,
                     'accept_digest': False,
                     'default_to_digest': False,
+                    'trusted_auth_header': 'REMOTE_USER',
                 },
                 'verbose': 0,
                 'dir_browser': {
@@ -144,6 +147,7 @@ class _AccountProvider(TelegramDAVProvider):
     def get_resource_inst(self, path, environ):
         account = environ.get('webdav.account')
         if not account:
+            logger.warning(f"WebDAV 请求未认证: {path}")
             return None
 
         chat_id = int(account.chat_id)
