@@ -121,6 +121,12 @@ jobs:
       - name: Lowercase image name
         run: echo "IMAGE_NAME=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
 
+      - name: Extract Docker Hub image name
+        run: |
+          # 去掉仓库所有者前缀，例如 hins-deployment/telegramforwarder -> telegramforwarder
+          repo="${{ github.repository }}"
+          echo "DOCKER_HUB_IMAGE=$(echo "${repo#*/}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
       - name: Download digests
         uses: actions/download-artifact@v4
         with:
@@ -174,7 +180,7 @@ jobs:
         env:
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
         run: |
-          docker_image="docker.io/${DOCKER_USERNAME}/${{ env.IMAGE_NAME }}"
+          docker_image="docker.io/${DOCKER_USERNAME}/${{ env.DOCKER_HUB_IMAGE }}"
           # 从 ghcr.io 的 tags 中提取标签，映射到 Docker Hub
           tags=$(jq -cr \
             --arg registry "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" \
