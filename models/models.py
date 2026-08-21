@@ -312,6 +312,20 @@ class User(Base):
     password = Column(String, nullable=False)
 
 
+class WebDAVAccount(Base):
+    __tablename__ = _tablename('webdav_accounts')
+
+    id = Column(Integer, primary_key=True)
+    chat_id = Column(String, nullable=False, unique=True)
+    username = Column(String, nullable=False, unique=True)
+    token = Column(String, nullable=False)
+    bot_token = Column(String, nullable=True)
+    api_base_url = Column(String, nullable=True)
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 # ---------------------------------------------------------------------------
 # 引擎创建 / 初始化 / 会话
 # ---------------------------------------------------------------------------
@@ -384,6 +398,7 @@ def migrate_db(engine):
     t_forward_history_pending_messages = _tablename('forward_history_pending_messages')
     t_forward_rules = _tablename('forward_rules')
     t_keywords = _tablename('keywords')
+    t_webdav_accounts = _tablename('webdav_accounts')
 
     # -----------------------------------------------------------------------
     # 1. 创建缺失的表（兼容从旧版本升级的情况）
@@ -399,6 +414,7 @@ def migrate_db(engine):
             (t_media_extensions, MediaExtensions),
             (t_forward_history_tasks, ForwardHistoryTask),
             (t_forward_history_pending_messages, ForwardHistoryPendingMessage),
+            (t_webdav_accounts, WebDAVAccount),
         ]:
             if not inspector.has_table(table_name):
                 logging.info(f"创建 {table_name} 表...")

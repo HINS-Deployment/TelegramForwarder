@@ -129,6 +129,10 @@ async def handle_command(client, event):
         'fh': lambda: handle_forward_history_command(event, 'forward_history', parts),
         'forward_history_status': lambda: handle_forward_history_status_command(event, command, parts),
         'fhs': lambda: handle_forward_history_status_command(event, 'forward_history_status', parts),
+        'webdav_add': lambda: handle_webdav_add_command(event, command, parts),
+        'webdav_remove': lambda: handle_webdav_remove_command(event, command, parts),
+        'webdav_list': lambda: handle_webdav_list_command(event, command, parts),
+        'webdav_token_reset': lambda: handle_webdav_token_reset_command(event, command, parts),
     }
 
     # 执行对应的命令处理器

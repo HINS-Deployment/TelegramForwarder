@@ -1,5 +1,5 @@
 import logging
-from models.models import get_session, ForwardRule, RuleSync
+from models.models import get_session, ForwardRule, RuleSync, WebDAVAccount
 from managers.state_manager import state_manager
 from utils.common import get_ai_settings_text
 from handlers import bot_handler
@@ -9,6 +9,7 @@ from utils.common import get_main_module
 import traceback
 from utils.auto_delete import send_message_and_delete
 from models.models import PushConfig
+from telethon import Button
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,44 @@ async def handle_prompt_setting(event, client, sender_id, chat_id, current_state
         prompt_type = "AI"
         template_type = "ai"
         logger.info(f"检测到设置AI提示词,规则ID:{rule_id}")
+    elif current_state.startswith("webdav_set_api:"):
+        account_id = int(current_state.split(":")[1])
+        logger.info(f"检测到设置 WebDAV API 代理域名,账号ID:{account_id}")
+        session = get_session()
+        try:
+            account = session.query(WebDAVAccount).get(account_id)
+            if not account:
+                await event.answer('账号不存在')
+                return True
+
+            api_url = event.message.text.strip()
+            if api_url.lower() in ('/cancel', '取消'):
+                account.api_base_url = None
+                session.commit()
+                await message.edit(
+                    f"已清除 API 代理域名",
+                    buttons=[[Button.inline('👈 返回', f'webdav_settings:{account.id}')]]
+                )
+            else:
+                # 清理 URL 格式
+                if api_url and not api_url.startswith('http'):
+                    api_url = f'https://{api_url}'
+                api_url = api_url.rstrip('/')
+                account.api_base_url = api_url
+                session.commit()
+                await message.edit(
+                    f"✅ API 代理域名已设置为: {api_url}",
+                    buttons=[[Button.inline('👈 返回', f'webdav_settings:{account.id}')]]
+                )
+
+            state_manager.clear_state(sender_id, chat_id)
+            await async_delete_user_message(client, event.message.chat_id, event.message.id, 0)
+        except Exception as e:
+            session.rollback()
+            logger.error(f"设置 WebDAV API 代理域名失败: {e}")
+        finally:
+            session.close()
+        return True
     elif current_state.startswith("set_userinfo_template:"):
         rule_id = current_state.split(":")[1]
         field_name = "userinfo_template"

@@ -17,6 +17,7 @@ from scheduler.history_forward_scheduler import HistoryForwardScheduler
 from handlers.bot_handler import send_welcome_message
 from handlers.command_handlers import set_history_scheduler
 from rss.main import app as rss_app
+from webdav.server import init_webdav_server
 from utils.log_config import setup_logging
 
 # 设置Docker日志的默认配置，如果docker-compose.yml中没有配置日志选项将使用这些值
@@ -43,6 +44,7 @@ db_ops = None
 scheduler = None
 chat_updater = None
 history_scheduler = None
+webdav_server = None
 
 
 async def init_db_ops():
@@ -107,7 +109,7 @@ def run_rss_server(host: str, port: int):
 
 async def start_clients():
     # 初始化 DBOperations
-    global db_ops, scheduler, chat_updater, history_scheduler
+    global db_ops, scheduler, chat_updater, history_scheduler, webdav_server
     db_ops = await DBOperations.create()
 
     try:
@@ -160,6 +162,16 @@ async def start_clients():
         else:
             logger.info("RSS 服务未启用")
 
+        # 启动 WebDAV 服务器
+        if os.getenv('WEBDAV_ENABLED', '').lower() == 'true':
+            try:
+                webdav_server = init_webdav_server(user_client, bot_client)
+                webdav_server.start()
+            except Exception as e:
+                logger.error(f"启动 WebDAV 服务器失败: {e}")
+        else:
+            logger.info("WebDAV 服务未启用")
+
         # 发送欢迎消息（bot 发不出时回退到 user_client）
         await send_welcome_message(bot_client, user_client)
 
@@ -181,6 +193,9 @@ async def start_clients():
         # 停止聊天信息更新器
         if chat_updater:
             chat_updater.stop()
+        # 停止 WebDAV 服务器
+        if webdav_server:
+            webdav_server.stop()
         # 如果 RSS 服务在运行，停止它
         if 'rss_process' in locals() and rss_process.is_alive():
             rss_process.terminate()
@@ -358,6 +373,23 @@ async def register_bot_commands(bot):
         BotCommand(
             command='forward_history_status',
             description='查看历史转发任务状态'
+        ),
+        # WebDAV 相关功能
+        BotCommand(
+            command='webdav_add',
+            description='添加WebDAV账号'
+        ),
+        BotCommand(
+            command='webdav_remove',
+            description='删除WebDAV账号'
+        ),
+        BotCommand(
+            command='webdav_list',
+            description='列出所有WebDAV账号'
+        ),
+        BotCommand(
+            command='webdav_token_reset',
+            description='重置WebDAV密码'
         ),
 
 

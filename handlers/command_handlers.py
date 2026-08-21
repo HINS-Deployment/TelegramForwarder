@@ -1,6 +1,6 @@
 from sqlalchemy.exc import IntegrityError
 from telethon import Button
-from models.models import MediaTypes, MediaExtensions
+from models.models import MediaTypes, MediaExtensions, WebDAVAccount
 from enums.enums import AddMode, ForwardMode
 from models.models import get_session, Keyword, ReplaceRule, User, RuleSync
 from utils.common import *
@@ -13,6 +13,8 @@ from version import VERSION, UPDATE_INFO
 import shlex
 import logging
 import os
+import re
+import secrets
 import aiohttp
 from utils.constants import RSS_HOST, RSS_PORT
 import models.models as models
@@ -835,6 +837,12 @@ async def handle_help_command(event, command):
         "**历史转发**\n"
         "/forward_history(/fh) <规则ID> [数量] - 按规则转发历史消息到目标聊天（默认全量）\n"
         "/forward_history_status(/fhs) [规则ID] - 查看历史转发任务状态\n\n"
+
+        "**WebDAV**\n"
+        "/webdav_add <聊天链接或ID> [bot_token] - 添加WebDAV账号\n"
+        "/webdav_remove <聊天ID> - 删除WebDAV账号\n"
+        "/webdav_list - 列出所有WebDAV账号\n"
+        "/webdav_token_reset <聊天ID> - 重置WebDAV密码\n\n"
 
         "**RSS相关**\n"
         "/delete_rss_user(/dru) [用户名] - 删除RSS用户\n"
@@ -2269,16 +2277,19 @@ async def handle_delete_rss_user_command(event, command, parts):
 async def handle_forward_history_command(event, command, parts):
     """处理 /forward_history <rule_id> [count] 命令"""
     if not _history_scheduler:
+        await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
         await reply_and_delete(event, "历史转发调度器尚未初始化")
         return
 
     if len(parts) < 2:
+        await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
         await reply_and_delete(event, "用法：/forward_history <规则ID> [数量]\n例：/forward_history 5 或 /forward_history 5 100")
         return
 
     try:
         rule_id = int(parts[1])
     except ValueError:
+        await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
         await reply_and_delete(event, "规则ID必须是数字")
         return
 
@@ -2287,12 +2298,15 @@ async def handle_forward_history_command(event, command, parts):
         try:
             count = int(parts[2])
             if count <= 0:
+                await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
                 await reply_and_delete(event, "数量必须大于 0")
                 return
         except ValueError:
+            await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
             await reply_and_delete(event, "数量必须是数字")
             return
 
+    await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
     success, message = await _history_scheduler.create_task(rule_id, count, event)
     await reply_and_delete(event, message)
 
@@ -2300,6 +2314,7 @@ async def handle_forward_history_command(event, command, parts):
 async def handle_forward_history_status_command(event, command, parts):
     """处理 /forward_history_status [rule_id] 命令"""
     if not _history_scheduler:
+        await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
         await reply_and_delete(event, "历史转发调度器尚未初始化")
         return
 
@@ -2308,8 +2323,270 @@ async def handle_forward_history_status_command(event, command, parts):
         try:
             rule_id = int(parts[1])
         except ValueError:
+            await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
             await reply_and_delete(event, "规则ID必须是数字")
             return
 
+    await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
     text = await _history_scheduler.get_task_status_text(rule_id)
     await reply_and_delete(event, text, delete_after_seconds=-1)
+
+
+async def _resolve_chat(client, chat_input: str) -> tuple:
+    """解析聊天链接/用户名/ID，返回 (entity, chat_id_str)。"""
+    # 纯数字，直接作为ID
+    if re.match(r'^-?\d+$', chat_input.strip()):
+        chat_id = chat_input.strip()
+        try:
+            entity = await client.get_entity(int(chat_id))
+            return entity, str(entity.id)
+        except Exception as e:
+            return None, str(e)
+
+    # t.me 链接或 @username
+    try:
+        entity = await client.get_entity(chat_input.strip())
+        return entity, str(entity.id)
+    except Exception as e:
+        return None, str(e)
+
+
+async def _check_bot_admin(client, chat_entity, bot_id: int) -> bool:
+    """检查 bot 是否在聊天中且有管理员权限。"""
+    try:
+        from telethon.tl.functions.channels import GetParticipantRequest
+        from telethon.tl.types import ChannelParticipantAdmin, ChannelParticipantCreator
+        participant = await client(GetParticipantRequest(chat_entity, bot_id))
+        if isinstance(participant.participant, (ChannelParticipantAdmin, ChannelParticipantCreator)):
+            return True
+        return False
+    except Exception:
+        return False
+
+
+async def _add_bot_to_chat(user_client, chat_entity, bot_username: str):
+    """用用户账号将 bot 添加为管理员。"""
+    try:
+        from telethon.tl.functions.channels import EditAdminRequest
+        from telethon.tl.types import ChatAdminRights, InputUser
+        bot_input = await user_client.get_input_entity(bot_username)
+        rights = ChatAdminRights(
+            post_messages=True,
+            edit_messages=True,
+            delete_messages=True,
+            invite_users=True,
+            pin_messages=True,
+            add_admins=False,
+            anonymous=False,
+            manage_call=False,
+            other=True,
+            ban_users=False,
+            change_info=False,
+            export_link=False,
+        )
+        await user_client(EditAdminRequest(chat_entity, bot_input, rights))
+        return True
+    except Exception as e:
+        logger.error(f"添加 bot 为管理员失败: {e}")
+        return False
+
+
+async def handle_webdav_add_command(event, command, parts):
+    """处理 /webdav_add <chat_link> [bot_token] [api_base_url] 命令"""
+    if len(parts) < 2:
+        await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
+        await reply_and_delete(event, "用法：/webdav_add <聊天链接或ID> [bot_token] [api_base_url]\n"
+                               "例：/webdav_add https://t.me/mychannel\n"
+                               "/webdav_add -1001234567890 123456:ABCdef\n"
+                               "/webdav_add @mychannel 123456:ABCdef https://my-bot-api.example.com")
+        return
+
+    chat_input = parts[1]
+    bot_token = parts[2] if len(parts) >= 3 else None
+    api_base_url = parts[3] if len(parts) >= 4 else None
+
+    # 获取主模块中的 user_client
+    main = await get_main_module()
+    user_client = main.user_client
+    bot_client = main.bot_client
+
+    # 解析聊天
+    entity, result = await _resolve_chat(user_client, chat_input)
+    if not entity:
+        await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
+        await reply_and_delete(event, f"无法解析聊天: {result}")
+        return
+
+    chat_id = str(entity.id)
+    chat_name = getattr(entity, 'title', 'Private Chat')
+
+    # 检查 bot 是否在聊天中且有管理员权限
+    bot_me = await bot_client.get_me()
+    bot_id = bot_me.id
+    bot_username = bot_me.username
+
+    bot_in_chat = await _check_bot_admin(bot_client, entity, bot_id)
+    if not bot_in_chat:
+        # 尝试用 user_client 添加 bot 为管理员
+        logger.info(f"bot 不在聊天 {chat_name} 中，尝试添加为管理员...")
+        added = await _add_bot_to_chat(user_client, entity, bot_username)
+        if not added:
+            await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
+            await reply_and_delete(event,
+                f"无法将 bot 添加到聊天 {chat_name}。\n"
+                f"请确保你对该聊天有添加管理员权限，或手动将 @{bot_username} 添加为管理员后再试。"
+            )
+            return
+        logger.info(f"成功将 bot 添加为 {chat_name} 的管理员")
+
+    # 检查是否已有该聊天记录（同一 chat_id 或同一 bot_token 不能重复）
+    session = get_session()
+    try:
+        existing = session.query(WebDAVAccount).filter(
+            WebDAVAccount.chat_id == chat_id
+        ).first()
+        if existing:
+            await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
+            await reply_and_delete(event, f"聊天 {chat_name} ({chat_id}) 已存在 WebDAV 账号，请先删除或使用 /webdav_token_reset")
+            return
+
+        if bot_token:
+            existing_token = session.query(WebDAVAccount).filter(
+                WebDAVAccount.bot_token == bot_token
+            ).first()
+            if existing_token:
+                await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
+                await reply_and_delete(event, "该 bot_token 已被其他 WebDAV 账号使用，同一 bot_token 不可重复使用")
+                return
+
+        # 生成随机 token
+        token = secrets.token_urlsafe(32)
+        account = WebDAVAccount(
+            chat_id=chat_id,
+            username=chat_id,
+            token=token,
+            bot_token=bot_token or None,
+            api_base_url=api_base_url or None,
+            enabled=True,
+        )
+        session.add(account)
+        session.commit()
+
+        await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
+        await reply_and_delete(event,
+            f"✅ WebDAV 账号已创建\n\n"
+            f"聊天: {chat_name}\n"
+            f"聊天ID: {chat_id}\n"
+            f"用户名: {chat_id}\n"
+            f"密码: {token}\n"
+            f"Bot Token: {'独立' if bot_token else '全局'}\n"
+            f"API 代理: {api_base_url or '无'}\n\n"
+            f"⚠️ 请保存好密码，此密码不会再次显示",
+            delete_after_seconds=-1
+        )
+    except Exception as e:
+        session.rollback()
+        logger.error(f"创建 WebDAV 账号失败: {e}")
+        await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
+        await reply_and_delete(event, f"创建 WebDAV 账号失败: {e}")
+    finally:
+        session.close()
+
+
+async def handle_webdav_remove_command(event, command, parts):
+    """处理 /webdav_remove <chat_id> 命令"""
+    if len(parts) < 2:
+        await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
+        await reply_and_delete(event, "用法：/webdav_remove <聊天ID>")
+        return
+
+    chat_id = parts[1]
+    session = get_session()
+    try:
+        account = session.query(WebDAVAccount).filter(
+            WebDAVAccount.chat_id == chat_id
+        ).first()
+        if not account:
+            await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
+            await reply_and_delete(event, f"未找到聊天 {chat_id} 的 WebDAV 账号")
+            return
+
+        session.delete(account)
+        session.commit()
+        await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
+        await reply_and_delete(event, f"已删除聊天 {chat_id} 的 WebDAV 账号")
+    except Exception as e:
+        session.rollback()
+        logger.error(f"删除 WebDAV 账号失败: {e}")
+        await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
+        await reply_and_delete(event, f"删除失败: {e}")
+    finally:
+        session.close()
+
+
+async def handle_webdav_list_command(event, command, parts):
+    """处理 /webdav_list 命令"""
+    session = get_session()
+    try:
+        accounts = session.query(WebDAVAccount).all()
+        if not accounts:
+            await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
+            await reply_and_delete(event, "没有 WebDAV 账号")
+            return
+
+        lines = ["📋 WebDAV 账号列表:\n"]
+        buttons = []
+        for acc in accounts:
+            status = "✅" if acc.enabled else "❌"
+            label = f"{status} {acc.chat_id}"
+            lines.append(f"{status} {acc.chat_id}\n")
+            buttons.append([Button.inline(label, f'webdav_settings:{acc.id}')])
+
+        buttons.append([Button.inline('❌ 关闭', 'close_settings')])
+
+        await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
+        await reply_and_delete(event, '\n'.join(lines), buttons=buttons, delete_after_seconds=-1)
+    except Exception as e:
+        logger.error(f"列出 WebDAV 账号失败: {e}")
+        await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
+        await reply_and_delete(event, f"获取列表失败: {e}")
+    finally:
+        session.close()
+
+
+async def handle_webdav_token_reset_command(event, command, parts):
+    """处理 /webdav_token_reset <chat_id> 命令"""
+    if len(parts) < 2:
+        await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
+        await reply_and_delete(event, "用法：/webdav_token_reset <聊天ID>")
+        return
+
+    chat_id = parts[1]
+    session = get_session()
+    try:
+        account = session.query(WebDAVAccount).filter(
+            WebDAVAccount.chat_id == chat_id
+        ).first()
+        if not account:
+            await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
+            await reply_and_delete(event, f"未找到聊天 {chat_id} 的 WebDAV 账号")
+            return
+
+        new_token = secrets.token_urlsafe(32)
+        account.token = new_token
+        session.commit()
+        await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
+        await reply_and_delete(event,
+            f"✅ 密码已重置\n\n"
+            f"聊天ID: {chat_id}\n"
+            f"新密码: {new_token}\n\n"
+            f"⚠️ 请保存好新密码",
+            delete_after_seconds=-1
+        )
+    except Exception as e:
+        session.rollback()
+        logger.error(f"重置 WebDAV 密码失败: {e}")
+        await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
+        await reply_and_delete(event, f"重置失败: {e}")
+    finally:
+        session.close()

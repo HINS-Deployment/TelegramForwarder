@@ -202,48 +202,54 @@ class HistoryForwardScheduler:
             source_id = int(source_chat.telegram_chat_id)
             target_id = int(target_chat.telegram_chat_id)
 
-            # 获取源/目标实体，用于后续 event 包装
+            # 获取源/目标实体
             source_entity = await self.user_client.get_entity(source_id)
             target_entity = await self.user_client.get_entity(target_id)
 
             send_client = self.bot_client if rule.use_bot else self.user_client
 
-            task.status = ForwardHistoryStatus.CLEARING_TARGET
-            task.started_at = datetime.utcnow()
-            task.updated_at = datetime.utcnow()
-            session.commit()
+            # 判断是否为恢复执行（已有进度）
+            is_resume = task.current_source_message_id is not None and task.current_source_message_id > 0
 
-            # 清空目标聊天
-            await self._clear_target_chat(target_id)
-
-            task.status = ForwardHistoryStatus.SCANNING
-            task.updated_at = datetime.utcnow()
-            session.commit()
-
-            # 确定停止消息（启动时刻源聊天最新消息）
-            latest_source = await self.user_client.get_messages(source_id, limit=1)
-            stop_message_id = latest_source[0].id if latest_source else None
-            task.stop_message_id = stop_message_id
-
-            # 全量/部分处理
-            current_id = 0
-            if task.start_message_id:
-                current_id = task.start_message_id - 1
-
-            count = None
-            # 如果 task.start_message_id 已设置说明是 count 模式，已在 create_task 里写好
-            # 估算总数
-            if task.start_message_id:
-                # 取 count 条时，总数 = stop - start + 1 的近似
-                total_info = await self.user_client.get_messages(source_id, limit=0)
-                task.total_messages = max(0, stop_message_id - task.start_message_id + 1)
+            if is_resume:
+                logger.info(f"恢复历史转发任务 {task_id}，从消息 ID {task.current_source_message_id} 继续")
+                task.status = ForwardHistoryStatus.SYNCING
+                task.updated_at = datetime.utcnow()
+                session.commit()
             else:
-                total_info = await self.user_client.get_messages(source_id, limit=0)
-                task.total_messages = total_info.total if hasattr(total_info, "total") else 0
+                task.status = ForwardHistoryStatus.CLEARING_TARGET
+                task.started_at = datetime.utcnow()
+                task.updated_at = datetime.utcnow()
+                session.commit()
 
-            task.status = ForwardHistoryStatus.SYNCING
-            task.updated_at = datetime.utcnow()
-            session.commit()
+                # 清空目标聊天
+                await self._clear_target_chat(target_id)
+
+                task.status = ForwardHistoryStatus.SCANNING
+                task.updated_at = datetime.utcnow()
+                session.commit()
+
+                # 确定停止消息（启动时刻源聊天最新消息）
+                latest_source = await self.user_client.get_messages(source_id, limit=1)
+                stop_message_id = latest_source[0].id if latest_source else None
+                task.stop_message_id = stop_message_id
+
+                # 估算总数
+                if task.start_message_id:
+                    task.total_messages = max(0, stop_message_id - task.start_message_id + 1)
+                else:
+                    total_info = await self.user_client.get_messages(source_id, limit=0)
+                    task.total_messages = total_info.total if hasattr(total_info, "total") else 0
+
+                task.status = ForwardHistoryStatus.SYNCING
+                task.updated_at = datetime.utcnow()
+                session.commit()
+
+            # 计算起始消息 ID
+            current_id = task.current_source_message_id or 0
+            if task.start_message_id and not current_id:
+                current_id = task.start_message_id - 1
+            stop_message_id = task.stop_message_id
 
             processed_since_cooldown = 0
             while True:

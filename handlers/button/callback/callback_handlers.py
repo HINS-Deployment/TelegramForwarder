@@ -13,6 +13,7 @@ from utils.constants import RSS_HOST, RSS_PORT
 from utils.auto_delete import respond_and_delete,reply_and_delete
 from utils.common import check_and_clean_chats
 from handlers.button.button_helpers import create_sync_rule_buttons,create_other_settings_buttons
+from handlers.button.callback.webdav_callback import WEBDAV_CALLBACK_HANDLERS
 
 logger = logging.getLogger(__name__)
 
@@ -698,4 +699,6 @@ CALLBACK_HANDLERS = {
     'toggle_media_send_mode': callback_toggle_media_send_mode,
     'delete_push_config': callback_delete_push_config,
     'push_page': callback_push_page,
+    # WebDAV 设置
+    **WEBDAV_CALLBACK_HANDLERS,
 }
