@@ -2336,12 +2336,15 @@ async def _resolve_chat(client, chat_input: str) -> tuple:
     """解析聊天链接/用户名/ID，返回 (entity, chat_id_str)。"""
     # 纯数字，直接作为ID
     if re.match(r'^-?\d+$', chat_input.strip()):
-        chat_id = chat_input.strip()
-        try:
-            entity = await client.get_entity(int(chat_id))
-            return entity, str(entity.id)
-        except Exception as e:
-            return None, str(e)
+        raw = chat_input.strip()
+        # 尝试多种 ID 格式
+        for try_id in _get_id_variants(raw):
+            try:
+                entity = await client.get_entity(int(try_id))
+                return entity, str(entity.id)
+            except Exception:
+                continue
+        return None, "无法解析聊天 ID，请确认 ID 正确且账号已加入该聊天"
 
     # t.me 链接或 @username
     try:
@@ -2349,6 +2352,23 @@ async def _resolve_chat(client, chat_input: str) -> tuple:
         return entity, str(entity.id)
     except Exception as e:
         return None, str(e)
+
+
+def _get_id_variants(raw_id: str) -> list:
+    """生成聊天 ID 的多种格式，用于尝试解析。"""
+    variants = [raw_id]
+    num = abs(int(raw_id))
+    # 如果是负数，尝试添加 -100 前缀（超级群组/频道）
+    if raw_id.startswith('-'):
+        if not raw_id.startswith('-100'):
+            variants.append(f'-100{num}')
+        else:
+            variants.append(f'-{num}')
+    # 正数（普通群组/用户）
+    else:
+        variants.append(f'-{num}')
+        variants.append(f'-100{num}')
+    return variants
 
 
 async def _check_bot_admin(client, chat_entity, bot_id: int) -> bool:
