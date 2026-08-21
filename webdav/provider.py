@@ -119,19 +119,20 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         self._is_bot_api = isinstance(msg, dict)
 
     def _bot_req(self, method, params=None, files=None, json=None):
-        """发送 Bot API HTTP 请求。"""
+        """发送 Bot API HTTP 请求（不走系统代理）。"""
         import httpx
         url = f"{self._api_base_url.rstrip('/')}/bot{self._bot_token}/{method}"
-        kwargs = {'timeout': 120}
-        if params:
-            kwargs['params'] = params
-        if files:
-            kwargs['files'] = files
-        if json:
-            kwargs['json'] = json
-        resp = httpx.post(url, **kwargs)
-        resp.raise_for_status()
-        return resp.json()
+        with httpx.Client(proxy=None) as client:
+            kwargs = {'timeout': 120}
+            if params:
+                kwargs['params'] = params
+            if files:
+                kwargs['files'] = files
+            if json:
+                kwargs['json'] = json
+            resp = client.post(url, **kwargs)
+            resp.raise_for_status()
+            return resp.json()
 
     def get_content_length(self):
         if self._is_bot_api:
@@ -193,9 +194,10 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
                 file_path = data['result']['file_path']
                 dl_url = f"{self._api_base_url.rstrip('/')}/file/bot{self._bot_token}/{file_path}"
                 import httpx
-                resp = httpx.get(dl_url, timeout=120)
-                resp.raise_for_status()
-                self._content = resp.content
+                with httpx.Client(proxy=None) as client:
+                    resp = client.get(dl_url, timeout=120)
+                    resp.raise_for_status()
+                    self._content = resp.content
                 access_logger.info(f"下载文件 {self._filename} ({len(self._content)} 字节) (via Bot API)")
             except Exception as e:
                 logger.error(f"下载文件 {self._filename} 失败: {e}")
@@ -226,12 +228,13 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         try:
             data = self._upload_buffer.getvalue()
             if self._api_base_url and self._bot_token:
-                # Bot API 上传
+                # Bot API 上传（不走系统代理）
                 url = f"{self._api_base_url.rstrip('/')}/bot{self._bot_token}/sendDocument"
                 import httpx
-                files = {'document': (self._filename, data)}
-                resp = httpx.post(url, files=files, timeout=120)
-                resp.raise_for_status()
+                with httpx.Client(proxy=None) as client:
+                    files = {'document': (self._filename, data)}
+                    resp = client.post(url, files=files, timeout=120)
+                    resp.raise_for_status()
                 access_logger.info(f"上传文件 {self._filename} ({len(data)} 字节) (via Bot API)")
             else:
                 # Telethon 上传
