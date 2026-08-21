@@ -82,6 +82,7 @@ class _WebDAVServer:
         self._main_loop = asyncio.get_event_loop()
         # 设置全局主循环引用，供 provider 使用
         set_main_loop(self._main_loop)
+        self._global_bot_token = os.getenv('BOT_TOKEN', '')
         self._thread = None
         self._server = None
 
@@ -96,7 +97,7 @@ class _WebDAVServer:
                 'host': WEBDAV_HOST,
                 'port': WEBDAV_PORT,
                 'provider_mapping': {
-                    '/': _AccountProvider(self.user_client, self.bot_client, self._main_loop),
+                    '/': _AccountProvider(self.user_client, self.bot_client, self._main_loop, self._global_bot_token),
                 },
                 'http_authenticator': {
                     'accept_basic': False,
@@ -143,11 +144,12 @@ class _WebDAVServer:
 class _AccountProvider(dav_provider.DAVProvider):
     """根据已认证账号信息创建对应聊天的 Provider"""
 
-    def __init__(self, user_client, bot_client, main_loop):
+    def __init__(self, user_client, bot_client, main_loop, global_bot_token=None):
         super().__init__()
         self.user_client = user_client
         self.bot_client = bot_client
         self._main_loop = main_loop
+        self._global_bot_token = global_bot_token
         self._cache = {}  # chat_id -> (files, timestamp)
 
     def _get_files_via_bot_api(self, bot_token, api_base_url, chat_id):
@@ -224,9 +226,12 @@ class _AccountProvider(dav_provider.DAVProvider):
 
         logger.info(f"WebDAV 扫描聊天 {chat_id} 的媒体文件...")
 
-        if bot_token and api_base_url:
+        # 有效 bot_token：账号指定或全局配置
+        effective_bot_token = bot_token or self._global_bot_token
+
+        if api_base_url and effective_bot_token:
             # 使用 Bot API HTTP 获取（走代理域名）
-            files = self._get_files_via_bot_api(bot_token, api_base_url, chat_id)
+            files = self._get_files_via_bot_api(effective_bot_token, api_base_url, chat_id)
             logger.info(f"WebDAV 聊天 {chat_id} Bot API 扫描完成，共 {len(files)} 个媒体文件")
         else:
             # 使用 Telethon MTProto 获取
@@ -263,7 +268,7 @@ class _AccountProvider(dav_provider.DAVProvider):
 
         chat_id = int(account.chat_id)
         client = self.user_client
-        bot_token = account.bot_token
+        bot_token = account.bot_token or self._global_bot_token
         api_base_url = account.api_base_url
 
         logger.info(f"WebDAV 请求: path={path!r} chat_id={chat_id}")
