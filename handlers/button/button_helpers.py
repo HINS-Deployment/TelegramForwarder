@@ -519,11 +519,12 @@ async def create_sync_rule_buttons(rule_id, page=0):
     Returns:
         按钮列表
     """
-    # 设置分页参数
-    
+    # 回调数据中的 rule_id 是字符串，PostgreSQL 等强类型数据库需要整数
+    rule_id = int(rule_id)
+
     buttons = []
     session = get_session()
-    
+
     try:
         # 获取当前规则
         current_rule = session.query(ForwardRule).get(rule_id)
