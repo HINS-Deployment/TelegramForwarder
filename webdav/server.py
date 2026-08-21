@@ -83,10 +83,12 @@ class _WebDAVServer:
                 'middleware_stack': [
                     AuthMiddleware,
                 ],
+                'http_authenticator': {
+                    'accept_basic': True,
+                    'accept_digest': False,
+                    'default_to_digest': False,
+                },
                 'verbose': 0,
-                'acceptbasic': True,
-                'acceptdigest': False,
-                'defaultdigest': False,
                 'dir_browser': {
                     'enable': True,
                     'davmount': False,
