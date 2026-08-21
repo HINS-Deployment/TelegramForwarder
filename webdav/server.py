@@ -2,10 +2,11 @@ import base64
 import logging
 import os
 import threading
+from wsgidav import dav_provider
 from wsgidav.wsgidav_app import WsgiDAVApp
 
 from models.models import WebDAVAccount, get_session
-from webdav.provider import TelegramDAVProvider, TelegramDAVRoot, TelegramDAVFile, _iter_media_messages, _get_filename
+from webdav.provider import TelegramDAVRoot, TelegramDAVFile, _iter_media_messages, _get_filename
 
 logger = logging.getLogger(__name__)
 
@@ -136,10 +137,11 @@ class _WebDAVServer:
                 logger.error(f"停止 WebDAV 服务器失败: {e}")
 
 
-class _AccountProvider(TelegramDAVProvider):
+class _AccountProvider(dav_provider.DAVProvider):
     """根据已认证账号信息创建对应聊天的 Provider"""
 
     def __init__(self, user_client, bot_client):
+        super().__init__()
         self.user_client = user_client
         self.bot_client = bot_client
         self._cache = {}  # chat_id -> (files, provider)
