@@ -91,6 +91,9 @@ class _WebDAVServer:
             config = {
                 'host': WEBDAV_HOST,
                 'port': WEBDAV_PORT,
+                'provider_mapping': {
+                    '/': _AccountProvider(self.user_client, self.bot_client),
+                },
                 'http_authenticator': {
                     'accept_basic': False,
                     'accept_digest': False,
@@ -107,10 +110,7 @@ class _WebDAVServer:
                     'rename_as_move': False,
                 },
             }
-            app = WsgiDAVApp(config)
-            # 直接设置 provider，不走 provider_mount 配置
-            app.provider = _AccountProvider(self.user_client, self.bot_client)
-            return AuthMiddleware(app)
+            return AuthMiddleware(WsgiDAVApp(config))
 
         def _run():
             try:
@@ -143,7 +143,33 @@ class _AccountProvider(dav_provider.DAVProvider):
         super().__init__()
         self.user_client = user_client
         self.bot_client = bot_client
-        self._cache = {}  # chat_id -> (files, provider)
+        self._cache = {}  # chat_id -> (files, timestamp)
+
+    def _get_files(self, chat_id, client):
+        """获取缓存的文件列表，带 30 秒 TTL。"""
+        import time
+        now = time.time()
+        if chat_id in self._cache:
+            files, ts = self._cache[chat_id]
+            if now - ts < 30:
+                return files
+
+        logger.info(f"WebDAV 扫描聊天 {chat_id} 的媒体文件...")
+        messages = _iter_media_messages(client, chat_id)
+        files = []
+        name_counts = {}
+        for i, msg in enumerate(messages):
+            base = _get_filename(msg, i)
+            if base in name_counts:
+                name_counts[base] += 1
+                name = f"{name_counts[base]}_{base}"
+            else:
+                name_counts[base] = 0
+                name = base
+            files.append((name, msg))
+        self._cache[chat_id] = (files, now)
+        logger.info(f"WebDAV 聊天 {chat_id} 扫描完成，共 {len(files)} 个媒体文件")
+        return files
 
     def get_resource_inst(self, path, environ):
         account = environ.get('webdav.account')
@@ -156,25 +182,7 @@ class _AccountProvider(dav_provider.DAVProvider):
 
         logger.info(f"WebDAV 请求: path={path!r} chat_id={chat_id}")
 
-        # 根据账号缓存文件列表
-        if chat_id not in self._cache:
-            logger.info(f"WebDAV 扫描聊天 {chat_id} 的媒体文件...")
-            messages = _iter_media_messages(client, chat_id)
-            files = []
-            name_counts = {}
-            for i, msg in enumerate(messages):
-                base = _get_filename(msg, i)
-                if base in name_counts:
-                    name_counts[base] += 1
-                    name = f"{name_counts[base]}_{base}"
-                else:
-                    name_counts[base] = 0
-                    name = base
-                files.append((name, msg))
-            self._cache[chat_id] = files
-            logger.info(f"WebDAV 聊天 {chat_id} 扫描完成，共 {len(files)} 个媒体文件")
-
-        files = self._cache[chat_id]
+        files = self._get_files(chat_id, client)
 
         if path == '/' or path == '':
             logger.info(f"WebDAV 返回根目录 ({len(files)} 个文件)")

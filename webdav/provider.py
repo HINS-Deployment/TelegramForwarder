@@ -137,6 +137,22 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         finally:
             loop.close()
 
+    def delete(self):
+        """删除文件（从聊天中删除对应消息）"""
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            async def _delete():
+                await self.client.delete_messages(self.chat_id, [self.msg.id], revoke=True)
+            loop.run_until_complete(_delete())
+            access_logger.info(f"删除文件 {self._filename} (消息ID {self.msg.id})")
+        except Exception as e:
+            logger.error(f"删除文件 {self._filename} 失败: {e}")
+            raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR, str(e))
+        finally:
+            loop.close()
+
 
 class TelegramDAVRoot(dav_provider.DAVCollection):
     """根目录资源，列出所有媒体文件"""
