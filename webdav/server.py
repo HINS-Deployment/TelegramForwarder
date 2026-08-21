@@ -38,14 +38,25 @@ class AuthMiddleware:
             ])
             return [b'Invalid authentication format']
 
+        logger.info(f"WebDAV 认证尝试: username={username!r}")
+
         session = get_session()
         try:
+            # 先查用户名
             account = session.query(WebDAVAccount).filter(
                 WebDAVAccount.username == username,
-                WebDAVAccount.token == password,
                 WebDAVAccount.enabled == True,
             ).first()
             if not account:
+                logger.warning(f"WebDAV 认证失败: 找不到用户 {username!r}")
+                start_response('401 Unauthorized', [
+                    ('WWW-Authenticate', 'Basic realm="Telegram WebDAV"'),
+                    ('Content-Type', 'text/plain'),
+                ])
+                return [b'Invalid credentials']
+            # 验证密码
+            if account.token != password:
+                logger.warning(f"WebDAV 认证失败: 用户 {username!r} 密码错误")
                 start_response('401 Unauthorized', [
                     ('WWW-Authenticate', 'Basic realm="Telegram WebDAV"'),
                     ('Content-Type', 'text/plain'),
