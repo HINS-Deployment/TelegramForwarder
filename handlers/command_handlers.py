@@ -839,7 +839,7 @@ async def handle_help_command(event, command):
         "/forward_history_status(/fhs) [规则ID] - 查看历史转发任务状态\n\n"
 
         "**WebDAV**\n"
-        "/webdav_add <聊天链接或ID> [bot_token] - 添加WebDAV账号\n"
+        "/webdav_add <聊天链接或ID> [-b bot_token] [-p 代理域名] - 添加WebDAV账号\n"
         "/webdav_remove <聊天ID> - 删除WebDAV账号\n"
         "/webdav_list - 列出所有WebDAV账号\n"
         "/webdav_token_reset <聊天ID> - 重置WebDAV密码\n\n"
@@ -2422,18 +2422,30 @@ async def _add_bot_to_chat(user_client, chat_entity, bot_username: str):
 
 
 async def handle_webdav_add_command(event, command, parts):
-    """处理 /webdav_add <chat_link> [bot_token] [api_base_url] 命令"""
+    """处理 /webdav_add <chat_link> [-b bot_token] [-p proxy_url] 命令"""
     if len(parts) < 2:
         await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
-        await reply_and_delete(event, "用法：/webdav_add <聊天链接或ID> [bot_token] [api_base_url]\n"
+        await reply_and_delete(event, "用法：/webdav_add <聊天链接或ID> [-b bot_token] [-p 代理域名]\n"
                                "例：/webdav_add https://t.me/mychannel\n"
-                               "/webdav_add -1001234567890 123456:ABCdef\n"
-                               "/webdav_add @mychannel 123456:ABCdef https://my-bot-api.example.com")
+                               "/webdav_add -1001234567890 -b 123456:ABCdef\n"
+                               "/webdav_add @mychannel -b 123456:ABCdef -p https://my-bot-api.example.com")
         return
 
     chat_input = parts[1]
-    bot_token = parts[2] if len(parts) >= 3 else None
-    api_base_url = parts[3] if len(parts) >= 4 else None
+    bot_token = None
+    api_base_url = None
+
+    # 解析 -b 和 -p 参数
+    i = 2
+    while i < len(parts):
+        if parts[i] == '-b' and i + 1 < len(parts):
+            bot_token = parts[i + 1]
+            i += 2
+        elif parts[i] == '-p' and i + 1 < len(parts):
+            api_base_url = parts[i + 1]
+            i += 2
+        else:
+            i += 1
 
     # 获取主模块中的 user_client
     main = await get_main_module()
