@@ -101,11 +101,11 @@ class _WebDAVServer:
         def _run():
             try:
                 app = _make_app()
-                # 使用 cheroot 作为 WSGI 服务器
-                from cheroot import wsgi
-                self._server = wsgi.Server((WEBDAV_HOST, WEBDAV_PORT), app)
+                # 使用标准库 wsgiref 作为 WSGI 服务器
+                from wsgiref.simple_server import make_server
+                self._server = make_server(WEBDAV_HOST, WEBDAV_PORT, app)
                 logger.info(f"WebDAV 服务器已启动在 {WEBDAV_HOST}:{WEBDAV_PORT}")
-                self._server.start()
+                self._server.serve_forever()
             except Exception as e:
                 logger.error(f"WebDAV 服务器异常: {e}", exc_info=True)
 
@@ -116,7 +116,7 @@ class _WebDAVServer:
         """停止 WebDAV 服务器"""
         if self._server:
             try:
-                self._server.stop()
+                self._server.shutdown()
                 logger.info("WebDAV 服务器已停止")
             except Exception as e:
                 logger.error(f"停止 WebDAV 服务器失败: {e}")
