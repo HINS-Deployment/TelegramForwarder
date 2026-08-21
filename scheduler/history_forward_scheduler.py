@@ -220,11 +220,6 @@ class HistoryForwardScheduler:
             task.updated_at = datetime.utcnow()
             session.commit()
 
-            # 获取目标消息列表（按时间升序）
-            target_msgs: List[Message] = []
-            async for msg in self.user_client.iter_messages(target_id, reverse=True, limit=None):
-                target_msgs.append(msg)
-
             # 确定停止消息（启动时刻源聊天最新消息）
             latest_source = await self.user_client.get_messages(source_id, limit=1)
             stop_message_id = latest_source[0].id if latest_source else None
@@ -273,7 +268,7 @@ class HistoryForwardScheduler:
                 for unit in units:
                     await self._process_unit(
                         session, task, unit, source_id, source_entity,
-                        target_id, target_msgs, send_client, rule
+                        target_id, send_client, rule
                     )
                     current_id = max(current_id, max(m.id for m in unit))
                     task.current_source_message_id = current_id
@@ -306,29 +301,7 @@ class HistoryForwardScheduler:
             session.close()
 
     async def _process_unit(self, session, task, unit, source_id, source_entity,
-                            target_id, target_msgs, send_client, rule):
-        first_msg = unit[0]
-        src_date = first_msg.date
-
-        # 删除目标聊天中时间排在当前源消息之后的消息
-        delete_ids = []
-        idx = 0
-        while idx < len(target_msgs) and target_msgs[idx].date < src_date:
-            idx += 1
-        while idx < len(target_msgs) and target_msgs[idx].date > src_date:
-            delete_ids.append(target_msgs[idx].id)
-            target_msgs.pop(idx)
-        if delete_ids:
-            try:
-                await self.user_client.delete_messages(target_id, delete_ids, revoke=True)
-                task.deleted_messages += len(delete_ids)
-                logger.info(f"为保证顺序删除目标消息 {len(delete_ids)} 条")
-            except FloodWaitError as e:
-                logger.warning(f"删除目标消息触发 FloodWait，等待 {e.seconds} 秒")
-                await asyncio.sleep(e.seconds)
-            except Exception as e:
-                logger.error(f"删除目标消息出错: {e}")
-
+                            target_id, send_client, rule):
         # 尝试原生转发，若失败则降级为下载再上传
         msg_ids = [m.id for m in unit]
         forwarded = False
@@ -360,31 +333,25 @@ class HistoryForwardScheduler:
         if not forwarded:
             # 降级：逐条下载再发送
             for msg in unit:
+                # 跳过系统消息（如入群通知），无法转发
+                if hasattr(msg, 'action') and msg.action is not None:
+                    logger.debug(f"跳过系统消息 ID {msg.id}")
+                    continue
                 try:
-                    await send_client.send_message(
-                        target_id,
-                        msg,
-                        link_preview=False,
-                    )
-                    logger.debug(f"已下载转发 1 条消息到目标聊天")
+                    # 获取消息文本内容
+                    msg_text = getattr(msg, 'message', None)
+                    if msg_text:
+                        await send_client.send_message(
+                            target_id,
+                            str(msg_text),
+                            link_preview=False,
+                        )
+                        logger.debug(f"已下载转发 1 条消息到目标聊天")
                 except FloodWaitError as e:
                     logger.warning(f"下载转发触发 FloodWait，等待 {e.seconds} 秒")
                     await asyncio.sleep(e.seconds)
                 except Exception as e:
                     logger.error(f"下载转发消息出错: {e}\n{traceback.format_exc()}")
-
-        # 重新拉取刚发送的目标消息，维持 target_msgs 有序
-        try:
-            sent = await send_client.get_messages(target_id, limit=5)
-            for m in sent:
-                # 按时间顺序插入到合适位置
-                insert_idx = 0
-                while insert_idx < len(target_msgs) and target_msgs[insert_idx].date < m.date:
-                    insert_idx += 1
-                if insert_idx >= len(target_msgs) or target_msgs[insert_idx].id != m.id:
-                    target_msgs.insert(insert_idx, m)
-        except Exception as e:
-            logger.debug(f"更新目标消息列表失败: {e}")
 
     async def _process_pending_messages(self, session, task, source_id, source_entity,
                                         target_id, send_client, rule):
