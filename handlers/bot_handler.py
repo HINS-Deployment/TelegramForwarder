@@ -144,19 +144,33 @@ async def callback_handler(event):
     await handle_callback(event)
 
 
-async def send_welcome_message(client):
-    """发送欢迎消息"""
-    main = await get_main_module()
+async def send_welcome_message(client, fallback_client=None):
+    """发送欢迎消息
+
+    先尝试用 bot_client 发送；bot 不能向未开始对话的用户发消息时，
+    回退到 user_client。两者都失败则记录警告，不影响主流程。
+    """
     user_id = await get_user_id()
 
-    # 发送新消息
-    await client.send_message(
-        user_id,
-        WELCOME_TEXT,
-        parse_mode='html',
-        link_preview=True
-    )
-    logger.info("已发送欢迎消息")
+    for attempt_client in (client, fallback_client):
+        if attempt_client is None:
+            continue
+        try:
+            await attempt_client.send_message(
+                user_id,
+                WELCOME_TEXT,
+                parse_mode='html',
+                link_preview=True
+            )
+            logger.info("已发送欢迎消息")
+            return
+        except ValueError as e:
+            logger.warning(f"用 {attempt_client.__class__.__name__} 发送欢迎消息失败: {e}")
+        except Exception as e:
+            logger.error(f"发送欢迎消息时出错: {e}")
+            return
+
+    logger.warning("未能向管理员发送欢迎消息，请确认 USER_ID 已主动与 bot 对话")
 
 
 

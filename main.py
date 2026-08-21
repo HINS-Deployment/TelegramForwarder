@@ -152,8 +152,8 @@ async def start_clients():
         else:
             logger.info("RSS 服务未启用")
 
-        # 发送欢迎消息
-        await send_welcome_message(bot_client)
+        # 发送欢迎消息（bot 发不出时回退到 user_client）
+        await send_welcome_message(bot_client, user_client)
 
         # 等待两个客户端都断开连接
         await asyncio.gather(
