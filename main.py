@@ -9,6 +9,7 @@ import asyncio
 import logging
 import uvicorn
 import multiprocessing
+from urllib.parse import urlparse
 from models.db_operations import DBOperations
 from scheduler.summary_scheduler import SummaryScheduler
 from scheduler.chat_updater import ChatUpdater
@@ -60,9 +61,33 @@ def clear_temp_dir():
         os.remove(os.path.join('./temp', file))
 
 
+def _parse_telegram_proxy(proxy_url: str):
+    """解析 TELEGRAM_PROXY 环境变量为 Telethon 可接受的 proxy 元组。"""
+    parsed = urlparse(proxy_url)
+    scheme = parsed.scheme.lower()
+    if scheme not in ('socks5', 'socks4', 'http', 'https'):
+        raise ValueError(f'不支持的 Telegram 代理协议: {scheme}')
+    host = parsed.hostname
+    port = parsed.port
+    username = parsed.username
+    password = parsed.password
+    if username and password:
+        return (scheme, host, port, True, username, password)
+    return (scheme, host, port)
+
+
+# 解析 Telegram 代理配置
+telegram_proxy_url = os.getenv('TELEGRAM_PROXY', '').strip()
+proxy_config = None
+if telegram_proxy_url:
+    _parsed_proxy = urlparse(telegram_proxy_url)
+    proxy_config = _parse_telegram_proxy(telegram_proxy_url)
+    logger.info(f'已配置 Telegram 代理: {_parsed_proxy.scheme}://{_parsed_proxy.hostname}:{_parsed_proxy.port}')
+
+
 # 创建客户端
-user_client = TelegramClient('./sessions/user', api_id, api_hash)
-bot_client = TelegramClient('./sessions/bot', api_id, api_hash)
+user_client = TelegramClient('./sessions/user', api_id, api_hash, proxy=proxy_config)
+bot_client = TelegramClient('./sessions/bot', api_id, api_hash, proxy=proxy_config)
 
 # 初始化数据库
 engine = init_db()
