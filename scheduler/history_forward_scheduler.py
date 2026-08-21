@@ -329,17 +329,15 @@ class HistoryForwardScheduler:
             except Exception as e:
                 logger.error(f"删除目标消息出错: {e}")
 
-        # 构造事件并调用 FilterChain
-        sender = getattr(first_msg, "sender", None)
-        event = HistoricalEvent(
-            client=self.user_client,
-            message=first_msg,
-            chat_id=source_id,
-            chat_entity=source_entity,
-            sender=sender,
-        )
+        # 使用原生 forward_messages 转发（跳过过滤器链，避免下载再上传）
         try:
-            await process_forward_rule(send_client, event, source_id, rule, is_history_sync=True)
+            msg_ids = [m.id for m in unit]
+            await send_client.forward_messages(
+                target_id,
+                messages=msg_ids,
+                from_peer=source_id,
+            )
+            logger.debug(f"已转发 {len(unit)} 条历史消息到目标聊天")
         except FloodWaitError as e:
             logger.warning(f"转发消息触发 FloodWait，等待 {e.seconds} 秒")
             await asyncio.sleep(e.seconds)
@@ -372,36 +370,34 @@ class HistoryForwardScheduler:
             if not pending:
                 break
 
-            ids = [p.source_message_id for p in pending]
-            messages = await self.user_client.get_messages(source_id, ids=ids)
-            for msg in messages:
-                if not msg:
-                    continue
-                sender = getattr(msg, "sender", None)
-                event = HistoricalEvent(
-                    client=self.user_client,
-                    message=msg,
-                    chat_id=source_id,
-                    chat_entity=source_entity,
-                    sender=sender,
-                )
+            msg_ids = [p.source_message_id for p in pending]
+            messages = await self.user_client.get_messages(source_id, ids=msg_ids)
+            # 收集有效的消息 ID 列表
+            valid_ids = [m.id for m in messages if m]
+            if valid_ids:
                 try:
-                    await process_forward_rule(send_client, event, source_id, rule, is_history_sync=True)
+                    await send_client.forward_messages(
+                        target_id,
+                        messages=valid_ids,
+                        from_peer=source_id,
+                    )
+                    logger.info(f"已转发 {len(valid_ids)} 条排队消息")
                 except FloodWaitError as e:
-                    logger.warning(f"处理排队消息触发 FloodWait，等待 {e.seconds} 秒")
+                    logger.warning(f"转发排队消息触发 FloodWait，等待 {e.seconds} 秒")
                     await asyncio.sleep(e.seconds)
                 except Exception as e:
-                    logger.error(f"处理排队消息出错: {e}\n{traceback.format_exc()}")
+                    logger.error(f"转发排队消息出错: {e}\n{traceback.format_exc()}")
 
-                # 删除已处理的 pending 记录
+            # 删除已处理的 pending 记录
+            for p in pending:
                 session.query(ForwardHistoryPendingMessage).filter_by(
                     task_id=task.id,
-                    source_message_id=msg.id
+                    source_message_id=p.source_message_id
                 ).delete()
-                task.processed_messages += 1
-                task.updated_at = datetime.utcnow()
-                session.commit()
-                await asyncio.sleep(random.uniform(INTERVAL_MIN, INTERVAL_MAX))
+            task.processed_messages += len(pending)
+            task.updated_at = datetime.utcnow()
+            session.commit()
+            await asyncio.sleep(random.uniform(INTERVAL_MIN, INTERVAL_MAX))
 
     async def _clear_target_chat(self, target_id: int):
         logger.info(f"开始清空目标聊天 {target_id}")
