@@ -143,6 +143,7 @@ class _AccountProvider(TelegramDAVProvider):
 
         # 根据账号缓存文件列表
         if chat_id not in self._cache:
+            logger.info(f"WebDAV 扫描聊天 {chat_id} 的媒体文件...")
             messages = _iter_media_messages(client, chat_id)
             files = []
             name_counts = {}
@@ -156,6 +157,7 @@ class _AccountProvider(TelegramDAVProvider):
                     name = base
                 files.append((name, msg))
             self._cache[chat_id] = files
+            logger.info(f"WebDAV 聊天 {chat_id} 扫描完成，共 {len(files)} 个媒体文件")
 
         files = self._cache[chat_id]
 

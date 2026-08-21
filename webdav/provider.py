@@ -11,6 +11,7 @@ from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto, DocumentA
 from wsgidav import dav_provider, dav_error
 
 logger = logging.getLogger(__name__)
+access_logger = logging.getLogger('webdav.access')
 
 
 def _get_filename(msg: Message, fallback_idx: int) -> str:
@@ -100,8 +101,9 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
                     data = await self.client.download_media(self.msg, bytes)
                     return data
                 self._content = loop.run_until_complete(_download())
+                access_logger.info(f"下载文件 {self._filename} ({len(self._content)} 字节)")
             except Exception as e:
-                logger.error(f"下载文件失败: {e}")
+                logger.error(f"下载文件 {self._filename} 失败: {e}")
                 raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR, str(e))
             finally:
                 loop.close()
@@ -128,9 +130,9 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
                     file_name=self._filename,
                 )
             loop.run_until_complete(_upload())
-            logger.info(f"上传文件 {self._filename} 到聊天 {self.chat_id} 成功")
+            access_logger.info(f"上传文件 {self._filename} ({len(data)} 字节) 到聊天 {self.chat_id}")
         except Exception as e:
-            logger.error(f"上传文件失败: {e}")
+            logger.error(f"上传文件 {self._filename} 失败: {e}")
             raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR, str(e))
         finally:
             loop.close()
@@ -156,17 +158,20 @@ class TelegramDAVRoot(dav_provider.DAVCollection):
             self._name_map[name] = f
 
     def get_member_names(self):
+        access_logger.info(f"列目录 / ({len(self._name_map)} 个文件)")
         return list(self._name_map.keys())
 
     def get_member(self, name):
         f = self._name_map.get(name)
         if f:
+            access_logger.info(f"访问文件 /{name}")
             return TelegramDAVFile(
                 f'/{name}', self.environ, f.msg, f.client, f.chat_id, name
             )
         return None
 
     def get_member_list(self):
+        access_logger.info(f"列目录 / ({len(self._name_map)} 个文件)")
         result = []
         for name, f in self._name_map.items():
             result.append(TelegramDAVFile(
