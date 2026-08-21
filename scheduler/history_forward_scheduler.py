@@ -411,15 +411,44 @@ class HistoryForwardScheduler:
                 batch.append(msg.id)
             if not batch:
                 break
+
+            # 记录删除前消息数量
+            before_count = len(batch)
+
             try:
-                await self.user_client.delete_messages(target_id, batch, revoke=True)
-                logger.info(f"已删除目标聊天 {len(batch)} 条消息")
+                result = await self.user_client.delete_messages(target_id, batch, revoke=True)
+                # 获取实际删除数量
+                deleted_count = len(result) if hasattr(result, "__len__") else before_count
+                logger.info(f"已删除目标聊天 {deleted_count} 条消息")
+
+                # 如果实际删除数为 0，说明这批消息无法删除，跳过并继续下一批
+                if deleted_count == 0:
+                    logger.warning(f"目标聊天 {target_id} 的这 {before_count} 条消息无法删除，可能为系统消息，跳过")
+                    continue
+
+                # 如果删除后的消息数量没有减少（即这批消息全部无法删除），需要检查是否还有可删除消息
+                # 通过检查下一批消息是否与当前批次完全一致来判断死循环
+                next_batch = []
+                async for msg in self.user_client.iter_messages(target_id, limit=TARGET_CLEAR_BATCH):
+                    next_batch.append(msg.id)
+                if next_batch and next_batch == batch:
+                    # 如果下一批消息 ID 与当前批次相同，说明这批消息都无法删除，退出循环
+                    logger.warning(f"目标聊天 {target_id} 剩余消息全部无法删除，清空终止")
+                    break
+
             except FloodWaitError as e:
                 logger.warning(f"清空目标聊天触发 FloodWait，等待 {e.seconds} 秒")
                 await asyncio.sleep(e.seconds)
             except Exception as e:
                 logger.error(f"清空目标聊天出错: {e}")
-                break
+                # 发生异常时，检查下一批消息是否相同，避免死循环
+                next_batch = []
+                async for msg in self.user_client.iter_messages(target_id, limit=TARGET_CLEAR_BATCH):
+                    next_batch.append(msg.id)
+                if next_batch and next_batch == batch:
+                    logger.warning(f"目标聊天 {target_id} 出现异常且消息未减少，退出清空")
+                    break
+                # 否则继续尝试
             await asyncio.sleep(random.uniform(0.5, 1.5))
 
     async def _cooldown(self, session, task):
