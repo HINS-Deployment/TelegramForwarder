@@ -93,7 +93,6 @@ class _WebDAVServer:
                     'enable': True,
                     'davmount': False,
                 },
-                'mount_path': '/',
                 'hotfixes': {
                     'recreate_null_resource_on_copy': False,
                     'rename_as_move': False,
