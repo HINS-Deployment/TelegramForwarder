@@ -96,38 +96,28 @@ class SenderFilter(BaseFilter):
             return False
     
     async def _send_media_group(self, context, target_chat_id, parse_mode):
-        """发送媒体组消息"""
-        rule = context.rule
+        \"\"\"发送媒体组消息\"\"\"\n        rule = context.rule
         client = context.client
         event = context.event
         # 初始化转发消息列表
         context.forwarded_messages = []
         
-        # if not context.media_group_messages:
-        #     logger.info(f'所有媒体都超限，发送文本和提示')
-        #     # 构建提示信息
-        #     text_to_send = context.message_text or ''
-
-        #     # 设置原始消息链接
-        #     context.original_link = f"\n原始消息: https://t.me/c/{str(event.chat_id)[4:]}/{event.message.id}"
-            
-        #     # 添加每个超限文件的信息
-        #     for message, size, name in context.skipped_media:
-        #         text_to_send += f"\n\n⚠️ 媒体文件 {name if name else '未命名文件'} ({size}MB) 超过大小限制"
-            
-        #     # 组合完整文本
-        #     text_to_send = context.sender_info + text_to_send + context.time_info + context.original_link
-            
-        #     await client.send_message(
-        #         target_chat_id,
-        #         text_to_send,
-        #         parse_mode=parse_mode,
-        #         link_preview=True,
-        #         buttons=context.buttons
-        #     )
-        #     logger.info(f'媒体组所有文件超限，已发送文本和提示')
-        #     return
-            
+        # 如果是媒体组，优先尝试原生转发整个组
+        if hasattr(event, 'message') and event.message and hasattr(event.message, 'id'):
+            try:
+                # 获取媒体组中所有消息的 ID
+                msg_ids = [m.id for m in context.media_group_messages] if context.media_group_messages else [event.message.id]
+                await client.forward_messages(
+                    target_chat_id,
+                    messages=msg_ids,
+                    from_peer=event.chat_id,
+                )
+                logger.info(f'原生转发媒体组消息成功，共 {len(msg_ids)} 条')
+                return
+            except Exception as e:
+                logger.warning(f'原生转发媒体组失败，降级为下载再上传: {e}')
+        
+        # 降级：下载再发送
         # 如果有可以发送的媒体，作为一个组发送
         files = []
         try:
@@ -151,10 +141,10 @@ class SenderFilter(BaseFilter):
                 
                 # 如果有超限文件，添加提示信息
                 for message, size, name in context.skipped_media:
-                    caption_text += f"\n\n⚠️ 媒体文件 {name if name else '未命名文件'} ({size}MB) 超过大小限制"
+                    caption_text += f\"\\n\\n⚠️ 媒体文件 {name if name else '未命名文件'} ({size}MB) 超过大小限制\"
                 
                 if context.skipped_media:
-                    context.original_link = f"\n原始消息: https://t.me/c/{str(event.chat_id)[4:]}/{event.message.id}"
+                    context.original_link = f\"\\n原始消息: https://t.me/c/{str(event.chat_id)[4:]}/{event.message.id}\"
                 # 添加时间信息和原始链接
                 caption_text += context.time_info + context.original_link
                 
@@ -194,8 +184,7 @@ class SenderFilter(BaseFilter):
                 logger.info(f'推送功能已启用，保留临时文件')
     
     async def _send_single_media(self, context, target_chat_id, parse_mode):
-        """发送单条媒体消息"""
-        rule = context.rule
+        \"\"\"发送单条媒体消息\"\"\"\n        rule = context.rule
         client = context.client
         event = context.event
         
@@ -206,10 +195,10 @@ class SenderFilter(BaseFilter):
             # 构建提示信息
             file_size = context.skipped_media[0][1]
             file_name = context.skipped_media[0][2]
-            original_link = f"\n原始消息: https://t.me/c/{str(event.chat_id)[4:]}/{event.message.id}"
+            original_link = f\"\\n原始消息: https://t.me/c/{str(event.chat_id)[4:]}/{event.message.id}\"
             
             text_to_send = context.message_text or ''
-            text_to_send += f"\n\n⚠️ 媒体文件 {file_name} ({file_size}MB) 超过大小限制"
+            text_to_send += f\"\\n\\n⚠️ 媒体文件 {file_name} ({file_size}MB) 超过大小限制\"
             text_to_send = context.sender_info + text_to_send + context.time_info
             
             text_to_send += original_link
@@ -224,6 +213,20 @@ class SenderFilter(BaseFilter):
             logger.info(f'媒体文件超过大小限制，仅转发文本')
             return
         
+        # 如果是单条媒体，优先尝试原生转发
+        if hasattr(event, 'message') and event.message and hasattr(event.message, 'id'):
+            try:
+                await client.forward_messages(
+                    target_chat_id,
+                    messages=event.message.id,
+                    from_peer=event.chat_id,
+                )
+                logger.info(f'原生转发单条媒体消息成功')
+                return
+            except Exception as e:
+                logger.warning(f'原生转发单条媒体失败，降级为下载再上传: {e}')
+        
+        # 降级：下载再发送
         # 确保context.media_files存在
         if not hasattr(context, 'media_files') or context.media_files is None:
             context.media_files = []
@@ -269,6 +272,7 @@ class SenderFilter(BaseFilter):
         """发送纯文本消息"""
         rule = context.rule
         client = context.client
+        event = context.event
         
         if not context.message_text:
             logger.info('没有文本内容，不发送消息')
@@ -284,6 +288,21 @@ class SenderFilter(BaseFilter):
         # 组合消息文本
         message_text = context.sender_info + context.message_text + context.time_info + context.original_link
         
+        # 如果是转发（有源消息ID），优先使用原生转发
+        if hasattr(event, 'message') and event.message and hasattr(event.message, 'id'):
+            try:
+                # 尝试转发原消息（文本消息也支持转发）
+                await client.forward_messages(
+                    target_chat_id,
+                    messages=event.message.id,
+                    from_peer=event.chat_id,
+                )
+                logger.info(f'原生转发文本消息成功')
+                return
+            except Exception as e:
+                logger.warning(f'原生转发文本消息失败，降级为重新发送: {e}')
+        
+        # 降级：重新发送
         await client.send_message(
             target_chat_id,
             str(message_text),

@@ -329,20 +329,49 @@ class HistoryForwardScheduler:
             except Exception as e:
                 logger.error(f"删除目标消息出错: {e}")
 
-        # 使用原生 forward_messages 转发（跳过过滤器链，避免下载再上传）
+        # 尝试原生转发，若失败则降级为下载再上传
+        msg_ids = [m.id for m in unit]
+        forwarded = False
         try:
-            msg_ids = [m.id for m in unit]
             await send_client.forward_messages(
                 target_id,
                 messages=msg_ids,
                 from_peer=source_id,
             )
-            logger.debug(f"已转发 {len(unit)} 条历史消息到目标聊天")
+            logger.debug(f"已原生转发 {len(unit)} 条历史消息到目标聊天")
+            forwarded = True
         except FloodWaitError as e:
             logger.warning(f"转发消息触发 FloodWait，等待 {e.seconds} 秒")
             await asyncio.sleep(e.seconds)
+            # 重试一次原生转发
+            try:
+                await send_client.forward_messages(
+                    target_id,
+                    messages=msg_ids,
+                    from_peer=source_id,
+                )
+                logger.debug(f"重试后原生转发 {len(unit)} 条历史消息成功")
+                forwarded = True
+            except Exception as e2:
+                logger.error(f"重试原生转发仍失败: {e2}")
         except Exception as e:
-            logger.error(f"转发历史消息单元出错: {e}\n{traceback.format_exc()}")
+            logger.warning(f"原生转发失败，尝试下载再上传: {e}")
+
+        if not forwarded:
+            # 降级：逐条下载再发送
+            for msg in unit:
+                try:
+                    await send_client.send_message(
+                        target_id,
+                        msg,
+                        link_preview=False,
+                    )
+                    logger.debug(f"已下载转发 1 条消息到目标聊天")
+                except FloodWaitError as e:
+                    logger.warning(f"下载转发触发 FloodWait，等待 {e.seconds} 秒")
+                    await asyncio.sleep(e.seconds)
+                except Exception as e:
+                    logger.error(f"下载转发消息出错: {e}\n{traceback.format_exc()}")
 
         # 重新拉取刚发送的目标消息，维持 target_msgs 有序
         try:
