@@ -21,11 +21,15 @@ class DeleteOriginalFilter(BaseFilter):
         """
         rule = context.rule
         event = context.event
-        
+
+        # 历史消息同步时不删除源消息
+        if getattr(context, 'is_history_sync', False):
+            return True
+
         # 如果不需要删除原始消息，直接返回
         if not rule.is_delete_original:
             return True
-            
+
         try:
             # 获取 main.py 中的用户客户端
             main = await get_main_module()

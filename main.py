@@ -13,7 +13,9 @@ from urllib.parse import urlparse
 from models.db_operations import DBOperations
 from scheduler.summary_scheduler import SummaryScheduler
 from scheduler.chat_updater import ChatUpdater
+from scheduler.history_forward_scheduler import HistoryForwardScheduler
 from handlers.bot_handler import send_welcome_message
+from handlers.command_handlers import set_history_scheduler
 from rss.main import app as rss_app
 from utils.log_config import setup_logging
 
@@ -40,6 +42,7 @@ db_ops = None
 
 scheduler = None
 chat_updater = None
+history_scheduler = None
 
 
 async def init_db_ops():
@@ -104,7 +107,7 @@ def run_rss_server(host: str, port: int):
 
 async def start_clients():
     # 初始化 DBOperations
-    global db_ops, scheduler, chat_updater
+    global db_ops, scheduler, chat_updater, history_scheduler
     db_ops = await DBOperations.create()
 
     try:
@@ -124,10 +127,15 @@ async def start_clients():
         # 注册命令
         await register_bot_commands(bot_client)
 
+        # 创建并启动历史转发调度器（需在命令处理器之前注入）
+        history_scheduler = HistoryForwardScheduler(user_client, bot_client)
+        set_history_scheduler(history_scheduler)
+        await history_scheduler.start()
+
         # 创建并启动调度器
         scheduler = SummaryScheduler(user_client, bot_client)
         await scheduler.start()
-        
+
         # 创建并启动聊天信息更新器
         chat_updater = ChatUpdater(user_client)
         await chat_updater.start()
@@ -164,6 +172,9 @@ async def start_clients():
         # 关闭 DBOperations
         if db_ops and hasattr(db_ops, 'close'):
             await db_ops.close()
+        # 停止历史转发调度器
+        if history_scheduler:
+            history_scheduler.stop()
         # 停止调度器
         if scheduler:
             scheduler.stop()
@@ -339,6 +350,14 @@ async def register_bot_commands(bot):
         BotCommand(
             command='delete_rss_user',
             description='删除RSS用户'
+        ),
+        BotCommand(
+            command='forward_history',
+            description='按规则转发历史消息'
+        ),
+        BotCommand(
+            command='forward_history_status',
+            description='查看历史转发任务状态'
         ),
 
 

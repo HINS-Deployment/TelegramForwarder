@@ -25,21 +25,23 @@ class FilterChain:
         self.filters.append(filter_obj)
         return self
         
-    async def process(self, client, event, chat_id, rule):
+    async def process(self, client, event, chat_id, rule, is_history_sync=False):
         """
         处理消息
-        
+
         Args:
             client: 机器人客户端
             event: 消息事件
             chat_id: 聊天ID
             rule: 转发规则
-            
+            is_history_sync: 是否为历史消息同步
+
         Returns:
             bool: 表示处理是否成功
         """
         # 创建消息上下文
         context = MessageContext(client, event, chat_id, rule)
+        context.is_history_sync = is_history_sync
         
         logger.info(f"开始过滤器链处理，共 {len(self.filters)} 个过滤器")
         

@@ -1,5 +1,5 @@
 from telethon import events
-from models.models import get_session, Chat, ForwardRule
+from models.models import get_session, Chat, ForwardRule, ForwardHistoryPendingMessage
 import logging
 from handlers import user_handler, bot_handler
 from handlers.prompt_handlers import handle_prompt_setting
@@ -8,6 +8,7 @@ import os
 from dotenv import load_dotenv
 from telethon.tl.types import ChannelParticipantsAdmins
 from managers.state_manager import state_manager
+from managers import history_sync_manager
 from telethon.tl import types
 from filters.process import process_forward_rule
 # 加载环境变量
@@ -150,6 +151,25 @@ async def handle_user_message(event, user_client, bot_client):
             if not rule.enable_rule:
                 logger.info(f'规则 {rule.id} 未启用')
                 continue
+
+            # 如果规则正在进行历史消息同步，新消息先排队
+            active_task = history_sync_manager.get_active_task(rule.id)
+            if active_task:
+                stop_id = active_task.stop_message_id
+                if stop_id is None or event.message.id > stop_id:
+                    try:
+                        session.add(ForwardHistoryPendingMessage(
+                            task_id=active_task.id,
+                            rule_id=rule.id,
+                            source_message_id=event.message.id,
+                        ))
+                        session.commit()
+                        logger.info(f"规则 {rule.id} 正在历史同步，消息 {event.message.id} 已排队")
+                    except Exception as e:
+                        session.rollback()
+                        logger.error(f"排队消息失败: {e}")
+                continue
+
             logger.info(f'处理转发规则 ID: {rule.id} (从 {source_chat.name} 转发到: {target_chat.name})')
             if rule.use_bot:
                 # 直接使用过滤器模块中的process_forward_rule函数

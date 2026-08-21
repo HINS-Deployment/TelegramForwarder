@@ -22,6 +22,15 @@ from handlers.button.settings_manager import create_settings_text, create_button
 
 logger = logging.getLogger(__name__)
 
+# 历史转发调度器，由 main.py 注入
+_history_scheduler = None
+
+
+def set_history_scheduler(scheduler):
+    """注入历史转发调度器实例"""
+    global _history_scheduler
+    _history_scheduler = scheduler
+
 async def handle_bind_command(event, client, parts):
     """处理 bind 命令"""
     # 使用shlex解析命令
@@ -822,6 +831,10 @@ async def handle_help_command(event, command):
         "/import_keyword(/ik) <同时发送文件> - 导入普通关键字\n"
         "/import_regex_keyword(/irk) <同时发送文件> - 导入正则关键字\n"
         "/import_replace(/ir) <同时发送文件> - 导入替换规则\n\n"
+
+        "**历史转发**\n"
+        "/forward_history(/fh) <规则ID> [数量] - 按规则转发历史消息到目标聊天（默认全量）\n"
+        "/forward_history_status(/fhs) [规则ID] - 查看历史转发任务状态\n\n"
 
         "**RSS相关**\n"
         "/delete_rss_user(/dru) [用户名] - 删除RSS用户\n"
@@ -2251,3 +2264,52 @@ async def handle_delete_rss_user_command(event, command, parts):
         await reply_and_delete(event,error_message)
     finally:
         session.close()
+
+
+async def handle_forward_history_command(event, command, parts):
+    """处理 /forward_history <rule_id> [count] 命令"""
+    if not _history_scheduler:
+        await reply_and_delete(event, "历史转发调度器尚未初始化")
+        return
+
+    if len(parts) < 2:
+        await reply_and_delete(event, "用法：/forward_history <规则ID> [数量]\n例：/forward_history 5 或 /forward_history 5 100")
+        return
+
+    try:
+        rule_id = int(parts[1])
+    except ValueError:
+        await reply_and_delete(event, "规则ID必须是数字")
+        return
+
+    count = None
+    if len(parts) >= 3:
+        try:
+            count = int(parts[2])
+            if count <= 0:
+                await reply_and_delete(event, "数量必须大于 0")
+                return
+        except ValueError:
+            await reply_and_delete(event, "数量必须是数字")
+            return
+
+    success, message = await _history_scheduler.create_task(rule_id, count, event)
+    await reply_and_delete(event, message)
+
+
+async def handle_forward_history_status_command(event, command, parts):
+    """处理 /forward_history_status [rule_id] 命令"""
+    if not _history_scheduler:
+        await reply_and_delete(event, "历史转发调度器尚未初始化")
+        return
+
+    rule_id = None
+    if len(parts) >= 2:
+        try:
+            rule_id = int(parts[1])
+        except ValueError:
+            await reply_and_delete(event, "规则ID必须是数字")
+            return
+
+    text = await _history_scheduler.get_task_status_text(rule_id)
+    await reply_and_delete(event, text, delete_after_seconds=-1)

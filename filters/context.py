@@ -63,7 +63,10 @@ class MessageContext:
         
         # 评论区链接
         self.comment_link = None
-        
+
+        # 是否为历史消息同步（历史同步时不应删除/编辑源消息）
+        self.is_history_sync = False
+
     def clone(self):
         """创建上下文的副本"""
         return copy.deepcopy(self) 

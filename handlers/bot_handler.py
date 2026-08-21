@@ -125,6 +125,10 @@ async def handle_command(client, event):
         'dr': lambda: handle_delete_rule_command(event, command, parts),
         'delete_rss_user': lambda: handle_delete_rss_user_command(event, command, parts),
         'dru': lambda: handle_delete_rss_user_command(event, command, parts),
+        'forward_history': lambda: handle_forward_history_command(event, command, parts),
+        'fh': lambda: handle_forward_history_command(event, 'forward_history', parts),
+        'forward_history_status': lambda: handle_forward_history_status_command(event, command, parts),
+        'fhs': lambda: handle_forward_history_status_command(event, 'forward_history_status', parts),
     }
 
     # 执行对应的命令处理器

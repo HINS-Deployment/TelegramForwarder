@@ -16,16 +16,17 @@ from filters.rss_filter import RSSFilter
 from filters.push_filter import PushFilter
 logger = logging.getLogger(__name__)
 
-async def process_forward_rule(client, event, chat_id, rule):
+async def process_forward_rule(client, event, chat_id, rule, is_history_sync=False):
     """
     处理转发规则
-    
+
     Args:
         client: 机器人客户端
         event: 消息事件
         chat_id: 聊天ID
         rule: 转发规则
-        
+        is_history_sync: 是否为历史消息同步
+
     Returns:
         bool: 处理是否成功
     """
@@ -77,6 +78,6 @@ async def process_forward_rule(client, event, chat_id, rule):
     filter_chain.add_filter(DeleteOriginalFilter())
     
     # 执行过滤器链
-    result = await filter_chain.process(client, event, chat_id, rule)
-    
-    return result 
+    result = await filter_chain.process(client, event, chat_id, rule, is_history_sync=is_history_sync)
+
+    return result

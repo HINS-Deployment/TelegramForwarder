@@ -1,9 +1,10 @@
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, ForeignKey, Enum, UniqueConstraint, inspect, text
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, ForeignKey, Enum, UniqueConstraint, inspect, text, Index, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
-from enums.enums import ForwardMode, PreviewMode, MessageMode, AddMode, HandleMode
+from enums.enums import ForwardMode, PreviewMode, MessageMode, AddMode, HandleMode, ForwardHistoryStatus
 import logging
 import os
+from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -118,6 +119,7 @@ class ForwardRule(Base):
     media_extensions = relationship('MediaExtensions', back_populates='rule', cascade="all, delete-orphan")
     rss_config = relationship('RSSConfig', uselist=False, back_populates='rule', cascade="all, delete-orphan")
     rule_syncs = relationship('RuleSync', back_populates='rule', cascade="all, delete-orphan")
+    history_tasks = relationship('ForwardHistoryTask', back_populates='rule', cascade="all, delete-orphan")
     push_config = relationship('PushConfig', uselist=False, back_populates='rule', cascade="all, delete-orphan")
 
 
@@ -196,6 +198,51 @@ class RuleSync(Base):
 
     # 关系
     rule = relationship('ForwardRule', back_populates='rule_syncs')
+
+
+class ForwardHistoryTask(Base):
+    __tablename__ = _tablename('forward_history_tasks')
+
+    id = Column(Integer, primary_key=True)
+    rule_id = Column(Integer, ForeignKey(f"{_tablename('forward_rules')}.id"), nullable=False, index=True)
+    status = Column(Enum(ForwardHistoryStatus), nullable=False, default=ForwardHistoryStatus.PENDING)
+
+    total_messages = Column(Integer, default=0)
+    processed_messages = Column(Integer, default=0)
+    deleted_messages = Column(Integer, default=0)
+
+    current_source_message_id = Column(Integer, nullable=True)
+    stop_message_id = Column(Integer, nullable=True)
+    start_message_id = Column(Integer, nullable=True)
+
+    error_message = Column(String, nullable=True)
+
+    started_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    finished_at = Column(DateTime, nullable=True)
+
+    # 关系
+    rule = relationship('ForwardRule', back_populates='history_tasks')
+    pending_messages = relationship('ForwardHistoryPendingMessage', back_populates='task',
+                                    cascade='all, delete-orphan')
+
+
+class ForwardHistoryPendingMessage(Base):
+    __tablename__ = _tablename('forward_history_pending_messages')
+
+    id = Column(Integer, primary_key=True)
+    task_id = Column(Integer, ForeignKey(f"{_tablename('forward_history_tasks')}.id"), nullable=False, index=True)
+    rule_id = Column(Integer, ForeignKey(f"{_tablename('forward_rules')}.id"), nullable=False, index=True)
+    source_message_id = Column(Integer, nullable=False)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # 关系
+    task = relationship('ForwardHistoryTask', back_populates='pending_messages')
+
+    __table_args__ = (
+        UniqueConstraint('task_id', 'source_message_id', name=_unique_name('unique_task_source_message')),
+    )
 
 
 class PushConfig(Base):
@@ -333,6 +380,8 @@ def migrate_db(engine):
     t_push_configs = _tablename('push_configs')
     t_media_types = _tablename('media_types')
     t_media_extensions = _tablename('media_extensions')
+    t_forward_history_tasks = _tablename('forward_history_tasks')
+    t_forward_history_pending_messages = _tablename('forward_history_pending_messages')
     t_forward_rules = _tablename('forward_rules')
     t_keywords = _tablename('keywords')
 
@@ -348,6 +397,8 @@ def migrate_db(engine):
             (t_push_configs, PushConfig),
             (t_media_types, MediaTypes),
             (t_media_extensions, MediaExtensions),
+            (t_forward_history_tasks, ForwardHistoryTask),
+            (t_forward_history_pending_messages, ForwardHistoryPendingMessage),
         ]:
             if not inspector.has_table(table_name):
                 logging.info(f"创建 {table_name} 表...")

@@ -24,3 +24,15 @@ class AddMode(enum.Enum):
 class HandleMode(enum.Enum):
     FORWARD = 'FORWARD'
     EDIT = 'EDIT'
+
+
+class ForwardHistoryStatus(enum.Enum):
+    PENDING = 'pending'
+    CLEARING_TARGET = 'clearing_target'
+    SCANNING = 'scanning'
+    SYNCING = 'syncing'
+    COOLDOWN = 'cooldown'
+    PROCESSING_PENDING = 'processing_pending'
+    COMPLETED = 'completed'
+    FAILED = 'failed'
+    CANCELLED = 'cancelled'

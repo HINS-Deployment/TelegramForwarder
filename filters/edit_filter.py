@@ -27,10 +27,12 @@ class EditFilter(BaseFilter):
         rule = context.rule
         event = context.event
 
-        
+        # 历史消息同步时不编辑源消息
+        if getattr(context, 'is_history_sync', False):
+            return True
 
         logger.debug(f"开始处理编辑过滤器，消息ID: {event.message.id}, 聊天ID: {event.chat_id}")
-        
+
         # 如果不是编辑模式，继续后续处理
         if rule.handle_mode != HandleMode.EDIT:
             logger.debug(f"当前规则非编辑模式 (当前模式: {rule.handle_mode})，跳过编辑处理")
