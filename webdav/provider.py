@@ -120,19 +120,18 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
 
     def _bot_req(self, method, params=None, files=None, json=None):
         """发送 Bot API HTTP 请求（不走系统代理）。"""
-        import httpx
+        import requests
         url = f"{self._api_base_url.rstrip('/')}/bot{self._bot_token}/{method}"
-        with httpx.Client(proxy=None) as client:
-            kwargs = {'timeout': 120}
-            if params:
-                kwargs['params'] = params
-            if files:
-                kwargs['files'] = files
-            if json:
-                kwargs['json'] = json
-            resp = client.post(url, **kwargs)
-            resp.raise_for_status()
-            return resp.json()
+        kwargs = {'timeout': 120, 'proxies': {'http': None, 'https': None}}
+        if params:
+            kwargs['params'] = params
+        if files:
+            kwargs['files'] = files
+        if json:
+            kwargs['json'] = json
+        resp = requests.post(url, **kwargs)
+        resp.raise_for_status()
+        return resp.json()
 
     def get_content_length(self):
         if self._is_bot_api:
@@ -193,11 +192,10 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
                     return io.BytesIO()
                 file_path = data['result']['file_path']
                 dl_url = f"{self._api_base_url.rstrip('/')}/file/bot{self._bot_token}/{file_path}"
-                import httpx
-                with httpx.Client(proxy=None) as client:
-                    resp = client.get(dl_url, timeout=120)
-                    resp.raise_for_status()
-                    self._content = resp.content
+                import requests
+                resp = requests.get(dl_url, timeout=120, proxies={'http': None, 'https': None})
+                resp.raise_for_status()
+                self._content = resp.content
                 access_logger.info(f"下载文件 {self._filename} ({len(self._content)} 字节) (via Bot API)")
             except Exception as e:
                 logger.error(f"下载文件 {self._filename} 失败: {e}")
@@ -230,11 +228,10 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
             if self._api_base_url and self._bot_token:
                 # Bot API 上传（不走系统代理）
                 url = f"{self._api_base_url.rstrip('/')}/bot{self._bot_token}/sendDocument"
-                import httpx
-                with httpx.Client(proxy=None) as client:
-                    files = {'document': (self._filename, data)}
-                    resp = client.post(url, files=files, timeout=120)
-                    resp.raise_for_status()
+                import requests
+                files = {'document': (self._filename, data)}
+                resp = requests.post(url, files=files, timeout=120, proxies={'http': None, 'https': None})
+                resp.raise_for_status()
                 access_logger.info(f"上传文件 {self._filename} ({len(data)} 字节) (via Bot API)")
             else:
                 # Telethon 上传

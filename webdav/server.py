@@ -154,13 +154,12 @@ class _AccountProvider(dav_provider.DAVProvider):
 
     def _get_files_via_bot_api(self, bot_token, api_base_url, chat_id):
         """通过 Bot API HTTP 获取聊天中的媒体文件列表（走代理域名，不走系统代理）。"""
-        import httpx
+        import requests
         url = f"{api_base_url.rstrip('/')}/bot{bot_token}/getUpdates"
         params = {'limit': 100, 'allowed_updates': ['message']}
         try:
-            with httpx.Client(proxy=None) as client:
-                resp = client.get(url, params=params, timeout=30)
-                data = resp.json()
+            resp = requests.get(url, params=params, timeout=30, proxies={'http': None, 'https': None})
+            data = resp.json()
         except Exception as e:
             logger.warning(f"Bot API getUpdates 失败: {e}")
             return []
