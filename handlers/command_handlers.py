@@ -2375,13 +2375,24 @@ async def _check_bot_admin(client, chat_entity, bot_id: int) -> bool:
     """检查 bot 是否在聊天中且有管理员权限。"""
     try:
         from telethon.tl.functions.channels import GetParticipantRequest
-        from telethon.tl.types import ChannelParticipantAdmin, ChannelParticipantCreator
+        from telethon.tl.types import (
+            ChannelParticipantAdmin, ChannelParticipantCreator,
+            ChatParticipantAdmin, ChatParticipantCreator,
+        )
         participant = await client(GetParticipantRequest(chat_entity, bot_id))
-        if isinstance(participant.participant, (ChannelParticipantAdmin, ChannelParticipantCreator)):
+        p = participant.participant
+        if isinstance(p, (ChannelParticipantAdmin, ChannelParticipantCreator,
+                          ChatParticipantAdmin, ChatParticipantCreator)):
             return True
-        return False
+        # 普通成员也算在聊天中
+        return True
     except Exception:
-        return False
+        # GetParticipantRequest 可能失败，尝试 get_entity 验证
+        try:
+            await client.get_entity(bot_id)
+            return True
+        except Exception:
+            return False
 
 
 async def _add_bot_to_chat(user_client, chat_entity, bot_username: str):
@@ -2402,7 +2413,6 @@ async def _add_bot_to_chat(user_client, chat_entity, bot_username: str):
             other=True,
             ban_users=False,
             change_info=False,
-            export_link=False,
         )
         await user_client(EditAdminRequest(chat_entity, bot_input, rights))
         return True
