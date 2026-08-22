@@ -141,8 +141,89 @@ class _WriteBuffer:
         self.close()
 
 
+class _TelethonStream:
+    """流式读取 Telethon 下载数据，边下载边透传给客户端。"""
+
+    def __init__(self, client, msg, timeout=3600):
+        import asyncio
+        self._loop = _main_loop
+        self._queue = asyncio.Queue(maxsize=64)
+        self._error = None
+        self._done = False
+        self._timeout = timeout
+
+        # 在事件循环中启动后台下载任务
+        async def _producer():
+            try:
+                async for chunk in client.iter_download(msg.media):
+                    await self._queue.put(chunk)
+                await self._queue.put(None)  # 结束标记
+            except Exception as e:
+                self._error = e
+                await self._queue.put(None)
+
+        self._task = asyncio.run_coroutine_threadsafe(_producer(), self._loop)
+
+    def read(self, size=-1):
+        import asyncio
+        if self._done:
+            return b''
+
+        chunks = []
+        remaining = size
+        while remaining != 0:
+            future = asyncio.run_coroutine_threadsafe(self._queue.get(), self._loop)
+            try:
+                chunk = future.result(timeout=self._timeout)
+            except Exception as e:
+                raise TimeoutError(f"下载流读取超时: {e}")
+
+            if chunk is None:
+                self._done = True
+                break
+
+            if self._error:
+                raise self._error
+
+            if size == -1:
+                chunks.append(chunk)
+            else:
+                take = min(len(chunk), remaining)
+                chunks.append(chunk[:take])
+                remaining -= take
+                if take < len(chunk):
+                    # 未消费的部分放回队列
+                    asyncio.run_coroutine_threadsafe(
+                        self._queue.put(chunk[take:]), self._loop
+                    )
+                    break
+
+        return b''.join(chunks)
+
+    def close(self):
+        self._done = True
+        if hasattr(self, '_task') and self._task:
+            self._task.cancel()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        data = self.read(65536)
+        if not data:
+            raise StopIteration
+        return data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
 class _StreamFile:
     """流式文件读取，读取后自动删除临时文件。"""
+
     def __init__(self, path):
         self._path = path
         self._file = open(path, 'rb')
@@ -342,30 +423,15 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         return None
 
     def _download_via_telethon(self):
-        """通过 Telethon MTProto 下载大文件（Bot API 限制 20MB），计入全局冷却。"""
+        """通过 Telethon MTProto 流式下载大文件，实时透传客户端。"""
         if not self.msg or not self.client:
             return None
 
         try:
             _check_telethon_rate_limit()
-
-            import tempfile
-            import os
-            # 下载到临时文件
-            fd, tmp_path = tempfile.mkstemp(suffix='.webdav_download')
-            os.close(fd)
-
-            def _do_download():
-                async def _inner():
-                    return await self.client.download_media(self.msg, file=tmp_path)
-                return _inner()
-
-            result = _run_async(self.client, _do_download, timeout=3600)
-            if result:
-                _increment_telethon_count()
-                access_logger.info(f"通过 Telethon 下载文件 {self._filename} (大文件回退)")
-                return _StreamFile(tmp_path)
-            return None
+            _increment_telethon_count()
+            access_logger.info(f"通过 Telethon 流式下载文件 {self._filename} (大文件回退)")
+            return _TelethonStream(self.client, self.msg, timeout=3600)
         except Exception as e:
             logger.error(f"Telethon 下载 {self._filename} 失败: {e}")
             return None
