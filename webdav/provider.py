@@ -168,8 +168,8 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
 
     def get_etag(self):
         if self._is_bot_api:
-            return f'"{self.msg.get("message_id", 0)}"'
-        return f'"{self.msg.id}"' if self.msg else f'"{self._filename}"'
+            return str(self.msg.get("message_id", 0))
+        return str(self.msg.id) if self.msg else self._filename
 
     def support_etag(self):
         return True
