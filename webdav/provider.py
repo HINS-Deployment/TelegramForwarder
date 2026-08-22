@@ -169,6 +169,8 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         media = self.msg.media
         if isinstance(media, MessageMediaDocument):
             return media.document.size
+        if isinstance(media, MessageMediaPhoto):
+            return 0
         return 0
 
     def get_content_type(self):
@@ -207,47 +209,54 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         if not self.msg:
             return io.BytesIO()
 
-        if self._is_bot_api and self._api_base_url and self._bot_token:
-            # Bot API 流式下载：getFile -> 获取文件路径 -> 流式传输
-            try:
+        # 优先走 Bot API 下载（走 api_base_url 代理域名，不走代理）
+        if self._api_base_url and self._bot_token:
+            file_id = None
+            if self._is_bot_api:
                 file_id = self.msg.get('file_id')
-                if not file_id:
-                    return io.BytesIO()
-                data = self._bot_req('getFile', params={'file_id': file_id})
-                if not data.get('ok'):
-                    return io.BytesIO()
-                file_path = data['result']['file_path']
-                dl_url = f"{self._api_base_url.rstrip('/')}/file/bot{self._bot_token}/{file_path}"
-                import requests
-                resp = requests.get(dl_url, stream=True, timeout=120, proxies={'http': None, 'https': None})
-                resp.raise_for_status()
-                access_logger.info(f"流式下载文件 {self._filename} (via Bot API)")
-                # 返回 HTTP 响应原始流，wsgidav 会按块读取
-                return resp.raw
-            except Exception as e:
-                logger.error(f"下载文件 {self._filename} 失败: {e}")
-                raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR, str(e))
-        else:
-            # Telethon 流式下载：下载到临时文件，再流式读取
-            import tempfile
-            tmp = tempfile.NamedTemporaryFile(delete=False)
-            tmp_path = tmp.name
-            tmp.close()
-            try:
-                def _fetch():
-                    async def _inner():
-                        await self.client.download_media(self.msg, file=tmp_path)
-                    return _inner()
-                _run_async(self.client, _fetch, timeout=3600)
-                file_size = os.path.getsize(tmp_path)
-                access_logger.info(f"流式下载文件 {self._filename} ({file_size} 字节) (via Telethon)")
-                # 返回文件对象，读取后自动删除临时文件
-                return _StreamFile(tmp_path)
-            except Exception as e:
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-                logger.error(f"下载文件 {self._filename} 失败: {e}", exc_info=True)
-                raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR, str(e))
+            else:
+                # 从 Telethon Message 中提取 Bot API file_id
+                try:
+                    msg_file = self.msg.file
+                    if msg_file:
+                        file_id = msg_file.id  # 返回 Bot API 格式的 file_id
+                except Exception:
+                    pass
+
+            if file_id:
+                # Bot API 流式下载
+                try:
+                    data = self._bot_req('getFile', params={'file_id': file_id})
+                    if data.get('ok'):
+                        file_path = data['result']['file_path']
+                        dl_url = f"{self._api_base_url.rstrip('/')}/file/bot{self._bot_token}/{file_path}"
+                        import requests
+                        resp = requests.get(dl_url, stream=True, timeout=120, proxies={'http': None, 'https': None})
+                        resp.raise_for_status()
+                        access_logger.info(f"流式下载文件 {self._filename} (via Bot API, file_id={file_id[:20]}...)")
+                        return resp.raw
+                except Exception as e:
+                    logger.warning(f"Bot API 下载失败，降级到 Telethon: {e}")
+
+        # Telethon 流式下载：下载到临时文件，再流式读取
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(delete=False)
+        tmp_path = tmp.name
+        tmp.close()
+        try:
+            def _fetch():
+                async def _inner():
+                    await self.client.download_media(self.msg, file=tmp_path)
+                return _inner()
+            _run_async(self.client, _fetch, timeout=3600)
+            file_size = os.path.getsize(tmp_path)
+            access_logger.info(f"流式下载文件 {self._filename} ({file_size} 字节) (via Telethon)")
+            return _StreamFile(tmp_path)
+        except Exception as e:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            logger.error(f"下载文件 {self._filename} 失败: {e}", exc_info=True)
+            raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR, str(e))
 
     def begin_write(self, content_type=None):
         """上传文件"""
