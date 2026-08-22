@@ -103,6 +103,35 @@ class _WriteBuffer:
         self.close()
 
 
+class _StreamFile:
+    """流式文件读取，读取后自动删除临时文件。"""
+    def __init__(self, path):
+        self._path = path
+        self._file = open(path, 'rb')
+
+    def read(self, size=-1):
+        return self._file.read(size)
+
+    def close(self):
+        try:
+            self._file.close()
+        finally:
+            if os.path.exists(self._path):
+                os.unlink(self._path)
+
+    def __iter__(self):
+        return self._file
+
+    def __next__(self):
+        return next(self._file)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
 class TelegramDAVFile(dav_provider.DAVNonCollection):
     """单个文件资源。支持 Telethon Message 对象和 Bot API 字典两种数据源。"""
 
@@ -113,7 +142,6 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         self.client = client
         self.chat_id = chat_id
         self._filename = filename
-        self._content = None
         self._bot_token = bot_token
         self._api_base_url = api_base_url
         self._is_bot_api = isinstance(msg, dict)
@@ -175,14 +203,12 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         return True
 
     def get_content(self):
-        """下载文件内容"""
+        """下载文件内容（流式）"""
         if not self.msg:
             return io.BytesIO()
-        if self._content is not None:
-            return io.BytesIO(self._content)
 
         if self._is_bot_api and self._api_base_url and self._bot_token:
-            # Bot API 下载：getFile -> 获取文件路径 -> 下载
+            # Bot API 流式下载：getFile -> 获取文件路径 -> 流式传输
             try:
                 file_id = self.msg.get('file_id')
                 if not file_id:
@@ -193,26 +219,35 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
                 file_path = data['result']['file_path']
                 dl_url = f"{self._api_base_url.rstrip('/')}/file/bot{self._bot_token}/{file_path}"
                 import requests
-                resp = requests.get(dl_url, timeout=120, proxies={'http': None, 'https': None})
+                resp = requests.get(dl_url, stream=True, timeout=120, proxies={'http': None, 'https': None})
                 resp.raise_for_status()
-                self._content = resp.content
-                access_logger.info(f"下载文件 {self._filename} ({len(self._content)} 字节) (via Bot API)")
+                access_logger.info(f"流式下载文件 {self._filename} (via Bot API)")
+                # 返回 HTTP 响应原始流，wsgidav 会按块读取
+                return resp.raw
             except Exception as e:
                 logger.error(f"下载文件 {self._filename} 失败: {e}")
                 raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR, str(e))
         else:
-            # Telethon 下载
+            # Telethon 流式下载：下载到临时文件，再流式读取
+            import tempfile
+            tmp = tempfile.NamedTemporaryFile(delete=False)
+            tmp_path = tmp.name
+            tmp.close()
             try:
                 def _fetch():
                     async def _inner():
-                        return await self.client.download_media(self.msg, bytes)
+                        await self.client.download_media(self.msg, file=tmp_path)
                     return _inner()
-                self._content = _run_async(self.client, _fetch)
-                access_logger.info(f"下载文件 {self._filename} ({len(self._content)} 字节)")
+                _run_async(self.client, _fetch, timeout=3600)
+                file_size = os.path.getsize(tmp_path)
+                access_logger.info(f"流式下载文件 {self._filename} ({file_size} 字节) (via Telethon)")
+                # 返回文件对象，读取后自动删除临时文件
+                return _StreamFile(tmp_path)
             except Exception as e:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
                 logger.error(f"下载文件 {self._filename} 失败: {e}", exc_info=True)
                 raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR, str(e))
-        return io.BytesIO(self._content) if self._content else io.BytesIO()
 
     def begin_write(self, content_type=None):
         """上传文件"""
