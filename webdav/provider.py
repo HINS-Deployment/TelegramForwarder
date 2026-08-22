@@ -13,6 +13,9 @@ from wsgidav import dav_provider, dav_error
 logger = logging.getLogger(__name__)
 access_logger = logging.getLogger('webdav.access')
 
+# Bot API 文件大小限制（20MB）
+BOT_API_SIZE_LIMIT = 20 * 1024 * 1024
+
 # 由 server.py 在启动时设置，供 _run_async 使用
 _main_loop = None
 
@@ -22,10 +25,70 @@ _telethon_operation_count = 0
 TELEHON_COOLDOWN_SECONDS = int(os.getenv("WEBDAV_TELEHON_COOLDOWN", "300"))
 TELEHON_MAX_PER_CYCLE = int(os.getenv("WEBDAV_TELEHON_MAX_PER_CYCLE", "10"))
 
+# 下载缓存（断点续传）：(chat_id, msg_id) -> {"path": str, "expires": float, "done": bool}
+_download_cache = {}
+DOWNLOAD_CACHE_TTL = int(os.getenv("WEBDAV_DOWNLOAD_CACHE_TTL", "600"))  # 默认 10 分钟
+
 
 def set_main_loop(loop):
     global _main_loop
     _main_loop = loop
+
+
+def _cache_key(msg):
+    """生成缓存键 (chat_id, msg_id)。"""
+    if msg is None:
+        return None
+    chat_id = getattr(msg, 'chat_id', None) or getattr(msg, 'chat_id', 0)
+    msg_id = getattr(msg, 'id', None) or getattr(msg, 'message_id', 0)
+    if not chat_id or not msg_id:
+        return None
+    return (int(chat_id), int(msg_id))
+
+
+def _cache_get(key):
+    """获取缓存，过期或不存在返回 None。"""
+    import time
+    if not key or key not in _download_cache:
+        return None
+    entry = _download_cache[key]
+    if time.time() >= entry["expires"]:
+        _cache_cleanup(key)
+        return None
+    if not os.path.exists(entry["path"]):
+        _cache_cleanup(key)
+        return None
+    return entry
+
+
+def _cache_set(key, path, done=False):
+    """设置缓存。"""
+    if not key:
+        return
+    import time
+    _download_cache[key] = {
+        "path": path,
+        "expires": time.time() + DOWNLOAD_CACHE_TTL,
+        "done": done,
+    }
+
+
+def _cache_cleanup(key=None):
+    """清理单个或全部过期缓存。"""
+    import time
+    if key:
+        entry = _download_cache.pop(key, None)
+        if entry and os.path.exists(entry["path"]):
+            try:
+                os.unlink(entry["path"])
+            except Exception:
+                pass
+        return
+    # 全量清理
+    now = time.time()
+    expired = [k for k, v in _download_cache.items() if now >= v["expires"]]
+    for k in expired:
+        _cache_cleanup(k)
 
 
 def _check_telethon_rate_limit():
@@ -142,68 +205,118 @@ class _WriteBuffer:
 
 
 class _TelethonStream:
-    """流式读取 Telethon 下载数据，边下载边透传给客户端。"""
+    """流式下载 + 缓存到临时文件，支持 seek（断点续传）。
+    
+    下载完成后临时文件保留在缓存中，同文件后续请求可直接复用。
+    """
 
-    def __init__(self, client, msg, timeout=3600):
+    def __init__(self, client, msg, cache_key, timeout=3600):
         import asyncio
+        import tempfile
+        import os
+        import threading
+
         self._loop = _main_loop
-        self._queue = asyncio.Queue(maxsize=64)
+        self._timeout = timeout
         self._error = None
         self._done = False
-        self._timeout = timeout
+        self._lock = threading.Lock()
+        self._cache_key = cache_key
 
-        # 在事件循环中启动后台下载任务
+        # 创建临时文件作为缓存
+        fd, self._path = tempfile.mkstemp(suffix='.webdav_download')
+        os.close(fd)
+        self._file = open(self._path, 'wb+')
+        self._write_pos = 0
+        self._read_pos = 0
+
+        # 注册到缓存
+        _cache_set(cache_key, self._path, done=False)
+
+        # 后台下载协程：iter_download → 写入临时文件
         async def _producer():
             try:
                 async for chunk in client.iter_download(msg.media):
-                    await self._queue.put(chunk)
-                await self._queue.put(None)  # 结束标记
+                    with self._lock:
+                        self._file.write(chunk)
+                        self._write_pos += len(chunk)
+                        self._file.flush()
+                self._done = True
+                # 更新缓存标记为已完成
+                _cache_set(cache_key, self._path, done=True)
             except Exception as e:
                 self._error = e
-                await self._queue.put(None)
+                self._done = True
 
         self._task = asyncio.run_coroutine_threadsafe(_producer(), self._loop)
 
+    def _wait_data(self, needed):
+        """等待缓存中有足够数据，返回可读字节数。"""
+        import time
+        start = time.time()
+        while True:
+            with self._lock:
+                if self._error:
+                    raise self._error
+                if self._done:
+                    return max(0, self._write_pos - self._read_pos)
+                available = self._write_pos - self._read_pos
+                if available >= needed:
+                    return available
+            if time.time() - start > self._timeout:
+                raise TimeoutError("下载流读取超时")
+            time.sleep(0.1)
+
     def read(self, size=-1):
-        import asyncio
-        if self._done:
-            return b''
+        if self._done and self._error:
+            raise self._error
 
-        chunks = []
-        remaining = size
-        while remaining != 0:
-            future = asyncio.run_coroutine_threadsafe(self._queue.get(), self._loop)
-            try:
-                chunk = future.result(timeout=self._timeout)
-            except Exception as e:
-                raise TimeoutError(f"下载流读取超时: {e}")
+        if size == -1:
+            # 等待下载完成，然后返回所有数据
+            self._wait_data(float('inf'))
+            with self._lock:
+                self._file.seek(self._read_pos)
+                data = self._file.read()
+                self._read_pos = self._file.tell()
+                return data
+        else:
+            # 等待至少 size 字节可用，返回实际可读的数量
+            available = self._wait_data(size)
+            with self._lock:
+                self._file.seek(self._read_pos)
+                data = self._file.read(min(size, available))
+                actual = len(data)
+                self._read_pos += actual
+                return data
 
-            if chunk is None:
-                self._done = True
-                break
+    def seek(self, offset, whence=0):
+        with self._lock:
+            if whence == 0:
+                self._read_pos = offset
+            elif whence == 1:
+                self._read_pos += offset
+            elif whence == 2:
+                self._read_pos = self._write_pos + offset
+            # 确保不越界
+            self._read_pos = max(0, min(self._read_pos, self._write_pos))
+            return self._read_pos
 
-            if self._error:
-                raise self._error
-
-            if size == -1:
-                chunks.append(chunk)
-            else:
-                take = min(len(chunk), remaining)
-                chunks.append(chunk[:take])
-                remaining -= take
-                if take < len(chunk):
-                    # 未消费的部分放回队列
-                    asyncio.run_coroutine_threadsafe(
-                        self._queue.put(chunk[take:]), self._loop
-                    )
-                    break
-
-        return b''.join(chunks)
+    def tell(self):
+        with self._lock:
+            return self._read_pos
 
     def close(self):
+        """关闭流，临时文件保留在缓存中供后续断点续传。"""
         self._done = True
         if hasattr(self, '_task') and self._task:
             self._task.cancel()
+        if hasattr(self, '_file') and self._file:
+            try:
+                self._file.close()
+            except Exception:
+                pass
+        # 不删除临时文件，保留在缓存中直到过期
+        # 由 _cache_cleanup 负责清理
 
     def __iter__(self):
         return self
@@ -291,6 +404,24 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         if isinstance(media, MessageMediaPhoto):
             return 0
         return 0
+
+    def _get_file_size(self):
+        """获取文件大小（字节），未知返回 0。"""
+        if self._file_id:
+            return 0
+        if not self.msg or not self.msg.media:
+            return 0
+        media = self.msg.media
+        if isinstance(media, MessageMediaDocument):
+            return media.document.size
+        if isinstance(media, MessageMediaPhoto):
+            return 0
+        return 0
+
+    def _is_large_file(self):
+        """文件是否超过 Bot API 大小限制（20MB），需要走 Telethon。"""
+        size = self._get_file_size()
+        return size > BOT_API_SIZE_LIMIT
 
     def get_content_type(self):
         if self._file_id:
@@ -423,30 +554,49 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         return None
 
     def _download_via_telethon(self):
-        """通过 Telethon MTProto 流式下载大文件，实时透传客户端。"""
+        """通过 Telethon MTProto 流式下载大文件，优先复用缓存。"""
         if not self.msg or not self.client:
             return None
+
+        key = _cache_key(self.msg)
+        if key:
+            cached = _cache_get(key)
+            if cached:
+                done = cached.get("done", False)
+                access_logger.info(f"复用缓存文件 {self._filename} (已完成={done})")
+                return _StreamFile(cached["path"])
 
         try:
             _check_telethon_rate_limit()
             _increment_telethon_count()
             access_logger.info(f"通过 Telethon 流式下载文件 {self._filename} (大文件回退)")
-            return _TelethonStream(self.client, self.msg, timeout=3600)
+            return _TelethonStream(self.client, self.msg, key, timeout=3600)
         except Exception as e:
             logger.error(f"Telethon 下载 {self._filename} 失败: {e}")
             return None
 
     def get_content(self):
-        """下载文件内容（优先 Bot API，大文件回退到 Telethon）"""
-        if not self._file_id:
-            self._get_file_id_via_bot_api()
-
+        """下载文件内容（>20MB 直接走 Telethon 流式，否则走 Bot API）。"""
         if not self._api_base_url or not self._bot_token:
             raise dav_error.DAVError(dav_error.HTTP_NOT_FOUND, "Bot API not configured")
+
+        # 大文件直接绕过 Bot API
+        if self._is_large_file():
+            logger.info(f"文件 {self._filename} 超过 {BOT_API_SIZE_LIMIT // 1024 // 1024}MB，直接走 Telethon")
+            telethon_result = self._download_via_telethon()
+            if telethon_result:
+                return telethon_result
+            logger.error(f"Telethon 下载 {self._filename} 失败")
+            raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR,
+                                     "Telethon download failed")
 
         try:
             import requests
             base = self._api_base_url.rstrip('/')
+
+            # 小文件走 Bot API（获取 file_id 后再下载）
+            if not self._file_id:
+                self._get_file_id_via_bot_api()
 
             data = self._get_file_data(self._api_base_url, self._bot_token, self._file_id)
             if data:
@@ -458,7 +608,7 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
                 access_logger.info(f"流式下载文件 {self._filename} (via Bot API)")
                 return resp.raw
 
-            # Bot API 失败（通常是大文件 > 20MB），回退到 Telethon
+            # Bot API 失败，回退到 Telethon
             logger.warning(f"Bot API 无法下载 {self._filename}，回退到 Telethon")
             telethon_result = self._download_via_telethon()
             if telethon_result:
@@ -479,13 +629,19 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         return self._upload_buffer
 
     def end_write(self, with_errors):
-        """完成上传，发送到 Telegram（优先 Bot API，大文件回退到 Telethon）。"""
+        """完成上传，发送到 Telegram（>20MB 直接走 Telethon，否则走 Bot API）。"""
         if with_errors or not hasattr(self, '_upload_buffer'):
             return
         data = self._upload_buffer.getvalue()
         if not self._api_base_url or not self._bot_token:
             raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR,
                                      "Bot API not configured for upload")
+
+        # 大文件直接绕过 Bot API
+        if len(data) > BOT_API_SIZE_LIMIT:
+            logger.info(f"上传文件 {self._filename} ({len(data)} 字节) 超过 {BOT_API_SIZE_LIMIT // 1024 // 1024}MB，直接走 Telethon")
+            self._upload_via_telethon(data)
+            return
 
         try:
             # Bot API 上传（不走系统代理）

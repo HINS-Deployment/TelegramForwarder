@@ -215,12 +215,12 @@ class _AccountProvider(dav_provider.DAVProvider):
         return files
 
     def _get_files(self, chat_id, bot_token=None, api_base_url=None):
-        """获取缓存的文件列表，带 30 秒 TTL。"""
+        """获取缓存的文件列表，带 5 分钟 TTL。"""
         import time
         now = time.time()
         if chat_id in self._cache:
             files, ts = self._cache[chat_id]
-            if now - ts < 30:
+            if now - ts < 300:
                 return files
 
         logger.info(f"WebDAV 扫描聊天 {chat_id} 的媒体文件...")
