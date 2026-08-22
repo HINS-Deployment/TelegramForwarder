@@ -16,10 +16,48 @@ access_logger = logging.getLogger('webdav.access')
 # 由 server.py 在启动时设置，供 _run_async 使用
 _main_loop = None
 
+# Telethon 全局速率限制（每周期 N 次大文件上下传，避免账号风控）
+_telethon_period_start = 0.0
+_telethon_operation_count = 0
+TELEHON_COOLDOWN_SECONDS = int(os.getenv("WEBDAV_TELEHON_COOLDOWN", "300"))
+TELEHON_MAX_PER_CYCLE = int(os.getenv("WEBDAV_TELEHON_MAX_PER_CYCLE", "10"))
+
 
 def set_main_loop(loop):
     global _main_loop
     _main_loop = loop
+
+
+def _check_telethon_rate_limit():
+    """检查 Telethon 速率限制，等待直到允许操作。"""
+    global _telethon_period_start, _telethon_operation_count
+    import time
+    now = time.time()
+
+    # 首次使用或周期已过期，重置计数器
+    if _telethon_period_start == 0 or now - _telethon_period_start >= TELEHON_COOLDOWN_SECONDS:
+        _telethon_period_start = now
+        _telethon_operation_count = 0
+        return
+
+    # 已达到周期内最大次数，等待周期结束
+    if _telethon_operation_count >= TELEHON_MAX_PER_CYCLE:
+        elapsed = now - _telethon_period_start
+        wait = TELEHON_COOLDOWN_SECONDS - elapsed
+        if wait > 0:
+            logger.info(f"Telethon 周期内已达上限 ({_telethon_operation_count}/{TELEHON_MAX_PER_CYCLE})，等待 {wait:.0f} 秒...")
+            time.sleep(wait)
+        # 重置新周期
+        _telethon_period_start = time.time()
+        _telethon_operation_count = 0
+
+
+def _increment_telethon_count():
+    """增加 Telethon 操作计数并记录日志。"""
+    global _telethon_operation_count
+    _telethon_operation_count += 1
+    remain = TELEHON_MAX_PER_CYCLE - _telethon_operation_count
+    logger.info(f"Telethon 操作计数: {_telethon_operation_count}/{TELEHON_MAX_PER_CYCLE} (本周期剩余 {remain} 次)")
 
 
 def _run_async(client, coro_factory, timeout=120):
@@ -287,12 +325,12 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         except Exception as e:
             logger.warning(f"getFile GET 异常: {e}")
 
-        # 都失败时，尝试官方 API（不走代理）
+        # 都失败时，尝试官方 API（不走系统代理）
         if 'api.telegram.org' not in api_base_url:
             try:
                 official_url = f"https://api.telegram.org/bot{bot_token}/getFile"
                 gf_resp = requests.post(official_url, json={'file_id': file_id},
-                                        timeout=30)
+                                        timeout=30, proxies={'http': None, 'https': None})
                 data = gf_resp.json()
                 if data.get('ok'):
                     access_logger.info("getFile 通过官方 API 回退成功")
@@ -303,36 +341,66 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
 
         return None
 
+    def _download_via_telethon(self):
+        """通过 Telethon MTProto 下载大文件（Bot API 限制 20MB），计入全局冷却。"""
+        if not self.msg or not self.client:
+            return None
+
+        try:
+            _check_telethon_rate_limit()
+
+            import tempfile
+            import os
+            # 下载到临时文件
+            fd, tmp_path = tempfile.mkstemp(suffix='.webdav_download')
+            os.close(fd)
+
+            def _do_download():
+                async def _inner():
+                    return await self.client.download_media(self.msg, file=tmp_path)
+                return _inner()
+
+            result = _run_async(self.client, _do_download, timeout=3600)
+            if result:
+                _increment_telethon_count()
+                access_logger.info(f"通过 Telethon 下载文件 {self._filename} (大文件回退)")
+                return _StreamFile(tmp_path)
+            return None
+        except Exception as e:
+            logger.error(f"Telethon 下载 {self._filename} 失败: {e}")
+            return None
+
     def get_content(self):
-        """下载文件内容（仅 Bot API，不走 Telethon）"""
+        """下载文件内容（优先 Bot API，大文件回退到 Telethon）"""
         if not self._file_id:
             self._get_file_id_via_bot_api()
 
-        if not self._file_id or not self._api_base_url or not self._bot_token:
-            raise dav_error.DAVError(dav_error.HTTP_NOT_FOUND, "No Bot API file_id available")
+        if not self._api_base_url or not self._bot_token:
+            raise dav_error.DAVError(dav_error.HTTP_NOT_FOUND, "Bot API not configured")
 
         try:
             import requests
             base = self._api_base_url.rstrip('/')
 
             data = self._get_file_data(self._api_base_url, self._bot_token, self._file_id)
-            if not data:
-                logger.error(f"getFile 所有方式均失败 (file_id={self._file_id[:20]}...)")
-                raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR,
-                                         "getFile failed after all retries")
+            if data:
+                file_path = data['result']['file_path']
+                dl_url = f"{base}/file/bot{self._bot_token}/{file_path}"
+                resp = requests.get(dl_url, stream=True, timeout=3600,
+                                    proxies={'http': None, 'https': None})
+                resp.raise_for_status()
+                access_logger.info(f"流式下载文件 {self._filename} (via Bot API)")
+                return resp.raw
 
-            file_path = data['result']['file_path']
-            # 根据 getFile 成功的 base URL 构造下载地址
-            if 'api.telegram.org' in base:
-                dl_base = base
-            else:
-                dl_base = base
-            dl_url = f"{dl_base}/file/bot{self._bot_token}/{file_path}"
-            resp = requests.get(dl_url, stream=True, timeout=3600,
-                                proxies={'http': None, 'https': None})
-            resp.raise_for_status()
-            access_logger.info(f"流式下载文件 {self._filename} (via Bot API)")
-            return resp.raw
+            # Bot API 失败（通常是大文件 > 20MB），回退到 Telethon
+            logger.warning(f"Bot API 无法下载 {self._filename}，回退到 Telethon")
+            telethon_result = self._download_via_telethon()
+            if telethon_result:
+                return telethon_result
+
+            logger.error(f"getFile 所有方式均失败 (file_id={self._file_id[:20]}...)")
+            raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR,
+                                     "getFile failed after all retries")
         except dav_error.DAVError:
             raise
         except Exception as e:
@@ -345,14 +413,15 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         return self._upload_buffer
 
     def end_write(self, with_errors):
-        """完成上传，发送到 Telegram"""
+        """完成上传，发送到 Telegram（优先 Bot API，大文件回退到 Telethon）。"""
         if with_errors or not hasattr(self, '_upload_buffer'):
             return
+        data = self._upload_buffer.getvalue()
+        if not self._api_base_url or not self._bot_token:
+            raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR,
+                                     "Bot API not configured for upload")
+
         try:
-            data = self._upload_buffer.getvalue()
-            if not self._api_base_url or not self._bot_token:
-                raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR,
-                                         "Bot API not configured for upload")
             # Bot API 上传（不走系统代理）
             url = f"{self._api_base_url.rstrip('/')}/bot{self._bot_token}/sendDocument"
             import requests
@@ -361,16 +430,59 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
             resp.raise_for_status()
             result = resp.json()
             if result.get('ok'):
-                # 缓存上传后的 file_id
                 doc = result.get('result', {}).get('document', {})
                 if doc.get('file_id'):
                     self._file_id = doc['file_id']
                 access_logger.info(f"上传文件 {self._filename} ({len(data)} 字节) (via Bot API)")
-            else:
-                logger.error(f"上传文件 {self._filename} 失败: {result.get('description', 'unknown')}")
+                return
+
+            # Bot API 上传失败，尝试 Telethon 回退
+            err_desc = result.get('description', 'unknown')
+            logger.warning(f"Bot API 上传失败 ({err_desc})，回退到 Telethon")
         except Exception as e:
-            logger.error(f"上传文件 {self._filename} 失败: {e}")
-            raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR, str(e))
+            # 如果 Bot API 请求本身异常（如文件过大），也尝试 Telethon 回退
+            logger.warning(f"Bot API 上传异常 ({e})，回退到 Telethon")
+
+        self._upload_via_telethon(data)
+
+    def _upload_via_telethon(self, data):
+        """通过 Telethon MTProto 上传大文件，计入全局冷却。"""
+        if not self.client:
+            raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR,
+                                     "Telethon 客户端不可用，无法上传")
+
+        _check_telethon_rate_limit()
+        import io
+        from telethon.tl.types import DocumentAttributeFilename
+
+        file_data = io.BytesIO(data)
+        file_data.name = self._filename
+
+        def _do_upload():
+            async def _inner():
+                return await self.client.send_file(
+                    int(self.chat_id),
+                    file_data,
+                    attributes=[DocumentAttributeFilename(self._filename)],
+                )
+            return _inner()
+
+        result = _run_async(self.client, _do_upload, timeout=3600)
+        if result:
+            _increment_telethon_count()
+            # 尝试从结果中提取 file_id
+            try:
+                media = result.media
+                if hasattr(media, 'document') and media.document:
+                    self._file_id = media.document.id
+                elif hasattr(media, 'photo') and media.photo:
+                    self._file_id = str(media.photo.id)
+            except Exception:
+                pass
+            access_logger.info(f"通过 Telethon 上传文件 {self._filename} ({len(data)} 字节) (大文件回退)")
+        else:
+            raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR,
+                                     "Telethon 上传失败")
 
     def delete(self):
         """删除文件（从聊天中删除对应消息）"""
