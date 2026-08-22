@@ -261,7 +261,7 @@ class _AccountProvider(dav_provider.DAVProvider):
                     total = 0
                     async for msg in client.iter_messages(cid, limit=1000):
                         total += 1
-                        if msg.media and not hasattr(msg, 'action'):
+                        if msg.media and msg.action is None:
                             msgs.append(msg)
                     logger.info(f"MTProto 尝试 chat_id={cid}: 共 {total} 条消息, {len(msgs)} 个媒体文件")
                     if msgs:

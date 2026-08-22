@@ -68,7 +68,7 @@ def _iter_media_messages(client, chat_id: int) -> List[Message]:
             async def _inner():
                 msgs = []
                 async for msg in client.iter_messages(chat_id, limit=1000):
-                    if msg.media and not hasattr(msg, 'action'):
+                    if msg.media and msg.action is None:
                         msgs.append(msg)
                 return msgs
             return _inner()
