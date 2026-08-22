@@ -246,12 +246,27 @@ class _AccountProvider(dav_provider.DAVProvider):
     def _get_files_via_mtproto(self, client, chat_id):
         """通过 Telethon MTProto 获取聊天中的媒体文件列表（全量历史）。"""
         import asyncio
+        # 尝试多种 ID 格式：正数、负数、-100 前缀
+        ids_to_try = [chat_id]
+        neg = -abs(chat_id)
+        if chat_id != neg:
+            ids_to_try.append(neg)
+        if not str(chat_id).startswith('-100'):
+            ids_to_try.append(int(f'-100{abs(chat_id)}'))
+
         async def _fetch():
-            msgs = []
-            async for msg in client.iter_messages(chat_id, limit=1000):
-                if msg.media and not hasattr(msg, 'action'):
-                    msgs.append(msg)
-            return msgs
+            for cid in ids_to_try:
+                try:
+                    msgs = []
+                    async for msg in client.iter_messages(cid, limit=1000):
+                        if msg.media and not hasattr(msg, 'action'):
+                            msgs.append(msg)
+                    if msgs:
+                        return msgs
+                except Exception:
+                    continue
+            return []
+
         future = asyncio.run_coroutine_threadsafe(_fetch(), self._main_loop)
         messages = future.result(timeout=60)
         files = []
