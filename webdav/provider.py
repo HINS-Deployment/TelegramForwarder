@@ -133,10 +133,10 @@ class _StreamFile:
 
 
 class TelegramDAVFile(dav_provider.DAVNonCollection):
-    """单个文件资源。支持 Telethon Message 对象和 Bot API 字典两种数据源。"""
+    """单个文件资源。"""
 
     def __init__(self, path, environ, msg, client, chat_id: int, filename: str,
-                 bot_token=None, api_base_url=None):
+                 bot_token=None, api_base_url=None, file_id=None):
         super().__init__(path, environ)
         self.msg = msg
         self.client = client
@@ -144,7 +144,7 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         self._filename = filename
         self._bot_token = bot_token
         self._api_base_url = api_base_url
-        self._is_bot_api = isinstance(msg, dict)
+        self._file_id = file_id or (msg.get('file_id') if isinstance(msg, dict) else None)
 
     def _bot_req(self, method, params=None, files=None, json=None):
         """发送 Bot API HTTP 请求（不走系统代理）。"""
@@ -162,8 +162,8 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         return resp.json()
 
     def get_content_length(self):
-        if self._is_bot_api:
-            return self.msg.get('file_size', 0)
+        if self._file_id:
+            return 0  # 由 Bot API 返回，长度未知
         if not self.msg or not self.msg.media:
             return 0
         media = self.msg.media
@@ -174,8 +174,8 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         return 0
 
     def get_content_type(self):
-        if self._is_bot_api:
-            return self.msg.get('mime_type', 'application/octet-stream')
+        if self._file_id:
+            return 'application/octet-stream'
         if not self.msg or not self.msg.media:
             return 'application/octet-stream'
         media = self.msg.media
@@ -186,8 +186,8 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         return 'application/octet-stream'
 
     def get_creation_date(self):
-        if self._is_bot_api:
-            return self.msg.get('date', 0)
+        if self._file_id:
+            return 0
         return self.msg.date.timestamp() if self.msg and self.msg.date else 0
 
     def get_last_modified(self):
@@ -197,65 +197,32 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         return self._filename
 
     def get_etag(self):
-        if self._is_bot_api:
-            return str(self.msg.get("message_id", 0))
+        if self._file_id:
+            return self._file_id
         return str(self.msg.id) if self.msg else self._filename
 
     def support_etag(self):
         return True
 
     def get_content(self):
-        """下载文件内容（流式）"""
-        if not self.msg:
-            return io.BytesIO()
+        """下载文件内容（仅 Bot API，不走 Telethon）"""
+        if not self._file_id or not self._api_base_url or not self._bot_token:
+            raise dav_error.DAVError(dav_error.HTTP_NOT_FOUND, "No Bot API file_id available")
 
-        # 优先走 Bot API 下载（走 api_base_url 代理域名，不走代理）
-        if self._api_base_url and self._bot_token:
-            file_id = None
-            if self._is_bot_api:
-                file_id = self.msg.get('file_id')
-            else:
-                # 从 Telethon Message 中提取 Bot API file_id
-                try:
-                    msg_file = self.msg.file
-                    if msg_file:
-                        file_id = msg_file.id  # 返回 Bot API 格式的 file_id
-                except Exception:
-                    pass
-
-            if file_id:
-                # Bot API 流式下载
-                try:
-                    data = self._bot_req('getFile', params={'file_id': file_id})
-                    if data.get('ok'):
-                        file_path = data['result']['file_path']
-                        dl_url = f"{self._api_base_url.rstrip('/')}/file/bot{self._bot_token}/{file_path}"
-                        import requests
-                        resp = requests.get(dl_url, stream=True, timeout=120, proxies={'http': None, 'https': None})
-                        resp.raise_for_status()
-                        access_logger.info(f"流式下载文件 {self._filename} (via Bot API, file_id={file_id[:20]}...)")
-                        return resp.raw
-                except Exception as e:
-                    logger.warning(f"Bot API 下载失败，降级到 Telethon: {e}")
-
-        # Telethon 流式下载：下载到临时文件，再流式读取
-        import tempfile
-        tmp = tempfile.NamedTemporaryFile(delete=False)
-        tmp_path = tmp.name
-        tmp.close()
         try:
-            def _fetch():
-                async def _inner():
-                    await self.client.download_media(self.msg, file=tmp_path)
-                return _inner()
-            _run_async(self.client, _fetch, timeout=3600)
-            file_size = os.path.getsize(tmp_path)
-            access_logger.info(f"流式下载文件 {self._filename} ({file_size} 字节) (via Telethon)")
-            return _StreamFile(tmp_path)
+            data = self._bot_req('getFile', params={'file_id': self._file_id})
+            if not data.get('ok'):
+                raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR,
+                                         f"getFile failed: {data.get('description', 'unknown')}")
+            file_path = data['result']['file_path']
+            dl_url = f"{self._api_base_url.rstrip('/')}/file/bot{self._bot_token}/{file_path}"
+            import requests
+            resp = requests.get(dl_url, stream=True, timeout=120, proxies={'http': None, 'https': None})
+            resp.raise_for_status()
+            access_logger.info(f"流式下载文件 {self._filename} (via Bot API)")
+            return resp.raw
         except Exception as e:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-            logger.error(f"下载文件 {self._filename} 失败: {e}", exc_info=True)
+            logger.error(f"下载文件 {self._filename} 失败: {e}")
             raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR, str(e))
 
     def begin_write(self, content_type=None):
@@ -269,52 +236,50 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
             return
         try:
             data = self._upload_buffer.getvalue()
-            if self._api_base_url and self._bot_token:
-                # Bot API 上传（不走系统代理）
-                url = f"{self._api_base_url.rstrip('/')}/bot{self._bot_token}/sendDocument"
-                import requests
-                files = {'document': (self._filename, data)}
-                resp = requests.post(url, files=files, timeout=120, proxies={'http': None, 'https': None})
-                resp.raise_for_status()
+            if not self._api_base_url or not self._bot_token:
+                raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR,
+                                         "Bot API not configured for upload")
+            # Bot API 上传（不走系统代理）
+            url = f"{self._api_base_url.rstrip('/')}/bot{self._bot_token}/sendDocument"
+            import requests
+            files = {'document': (self._filename, data)}
+            resp = requests.post(url, files=files, timeout=120, proxies={'http': None, 'https': None})
+            resp.raise_for_status()
+            result = resp.json()
+            if result.get('ok'):
+                # 缓存上传后的 file_id
+                doc = result.get('result', {}).get('document', {})
+                if doc.get('file_id'):
+                    self._file_id = doc['file_id']
                 access_logger.info(f"上传文件 {self._filename} ({len(data)} 字节) (via Bot API)")
             else:
-                # Telethon 上传
-                def _upload():
-                    async def _inner():
-                        await self.client.send_file(
-                            self.chat_id,
-                            data,
-                            file_name=self._filename,
-                        )
-                    return _inner()
-                _run_async(self.client, _upload)
-                access_logger.info(f"上传文件 {self._filename} ({len(data)} 字节)")
+                logger.error(f"上传文件 {self._filename} 失败: {result.get('description', 'unknown')}")
         except Exception as e:
             logger.error(f"上传文件 {self._filename} 失败: {e}")
             raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR, str(e))
 
     def delete(self):
         """删除文件（从聊天中删除对应消息）"""
-        if not self.msg:
+        if not self.msg and not self._file_id:
             return
         try:
-            if self._is_bot_api and self._api_base_url and self._bot_token:
+            if self._file_id and self._api_base_url and self._bot_token:
                 # Bot API 删除
-                msg_id = self.msg.get('message_id')
-                chat_id = self.msg.get('chat_id') or self.chat_id
+                msg_id = None
+                chat_id = self.chat_id
+                if isinstance(self.msg, dict):
+                    msg_id = self.msg.get('message_id')
+                    chat_id = self.msg.get('chat_id') or chat_id
+                elif self.msg:
+                    msg_id = self.msg.id
                 self._bot_req('deleteMessage', json={
                     'chat_id': int(chat_id),
                     'message_id': msg_id,
                 })
                 access_logger.info(f"删除文件 {self._filename} (消息ID {msg_id}) (via Bot API)")
             else:
-                # Telethon 删除
-                def _del():
-                    async def _inner():
-                        await self.client.delete_messages(self.chat_id, [self.msg.id], revoke=True)
-                    return _inner()
-                _run_async(self.client, _del)
-                access_logger.info(f"删除文件 {self._filename} (消息ID {self.msg.id})")
+                raise dav_error.DAVError(dav_error.HTTP_METHOD_NOT_ALLOWED,
+                                         "Deletion requires Bot API configuration")
         except Exception as e:
             logger.error(f"删除文件 {self._filename} 失败: {e}")
             raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR, str(e))
@@ -354,7 +319,8 @@ class TelegramDAVRoot(dav_provider.DAVCollection):
             access_logger.info(f"访问文件 /{name}")
             return TelegramDAVFile(
                 f'/{name}', self.environ, f.msg, f.client, f.chat_id, name,
-                bot_token=self._bot_token, api_base_url=self._api_base_url
+                bot_token=self._bot_token, api_base_url=self._api_base_url,
+                file_id=f._file_id
             )
         return None
 
@@ -364,7 +330,8 @@ class TelegramDAVRoot(dav_provider.DAVCollection):
         for name, f in self._name_map.items():
             result.append(TelegramDAVFile(
                 f'/{name}', self.environ, f.msg, f.client, f.chat_id, name,
-                bot_token=self._bot_token, api_base_url=self._api_base_url
+                bot_token=self._bot_token, api_base_url=self._api_base_url,
+                file_id=f._file_id
             ))
         return result
 
