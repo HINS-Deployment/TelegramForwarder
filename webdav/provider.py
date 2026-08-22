@@ -260,6 +260,49 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
             logger.warning(f"获取 Bot API file_id 失败: {e}")
             return None
 
+    def _get_file_data(self, api_base_url, bot_token, file_id):
+        """调用 Bot API getFile 获取文件信息，先 POST 再 GET 回退。"""
+        import requests
+        base = api_base_url.rstrip('/')
+        url = f"{base}/bot{bot_token}/getFile"
+        kwargs = {'timeout': 30, 'proxies': {'http': None, 'https': None}}
+
+        # 先尝试 POST + JSON body（某些代理不支持 GET）
+        try:
+            gf_resp = requests.post(url, json={'file_id': file_id}, **kwargs)
+            data = gf_resp.json()
+            if data.get('ok'):
+                return data
+            logger.warning(f"getFile POST 失败: {data.get('description', 'unknown')}")
+        except Exception as e:
+            logger.warning(f"getFile POST 异常: {e}")
+
+        # 回退到 GET + query params
+        try:
+            gf_resp = requests.get(url, params={'file_id': file_id}, **kwargs)
+            data = gf_resp.json()
+            if data.get('ok'):
+                return data
+            logger.warning(f"getFile GET 失败: {data.get('description', 'unknown')}")
+        except Exception as e:
+            logger.warning(f"getFile GET 异常: {e}")
+
+        # 都失败时，尝试官方 API（不走代理）
+        if 'api.telegram.org' not in api_base_url:
+            try:
+                official_url = f"https://api.telegram.org/bot{bot_token}/getFile"
+                gf_resp = requests.post(official_url, json={'file_id': file_id},
+                                        timeout=30)
+                data = gf_resp.json()
+                if data.get('ok'):
+                    access_logger.info("getFile 通过官方 API 回退成功")
+                    return data
+                logger.error(f"getFile 官方 API 也失败: {data.get('description', 'unknown')}")
+            except Exception as e:
+                logger.error(f"getFile 官方 API 异常: {e}")
+
+        return None
+
     def get_content(self):
         """下载文件内容（仅 Bot API，不走 Telethon）"""
         if not self._file_id:
@@ -269,17 +312,29 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
             raise dav_error.DAVError(dav_error.HTTP_NOT_FOUND, "No Bot API file_id available")
 
         try:
-            data = self._bot_req('getFile', params={'file_id': self._file_id})
-            if not data.get('ok'):
-                raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR,
-                                         f"getFile failed: {data.get('description', 'unknown')}")
-            file_path = data['result']['file_path']
-            dl_url = f"{self._api_base_url.rstrip('/')}/file/bot{self._bot_token}/{file_path}"
             import requests
-            resp = requests.get(dl_url, stream=True, timeout=120, proxies={'http': None, 'https': None})
+            base = self._api_base_url.rstrip('/')
+
+            data = self._get_file_data(self._api_base_url, self._bot_token, self._file_id)
+            if not data:
+                logger.error(f"getFile 所有方式均失败 (file_id={self._file_id[:20]}...)")
+                raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR,
+                                         "getFile failed after all retries")
+
+            file_path = data['result']['file_path']
+            # 根据 getFile 成功的 base URL 构造下载地址
+            if 'api.telegram.org' in base:
+                dl_base = base
+            else:
+                dl_base = base
+            dl_url = f"{dl_base}/file/bot{self._bot_token}/{file_path}"
+            resp = requests.get(dl_url, stream=True, timeout=3600,
+                                proxies={'http': None, 'https': None})
             resp.raise_for_status()
             access_logger.info(f"流式下载文件 {self._filename} (via Bot API)")
             return resp.raw
+        except dav_error.DAVError:
+            raise
         except Exception as e:
             logger.error(f"下载文件 {self._filename} 失败: {e}")
             raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR, str(e))
