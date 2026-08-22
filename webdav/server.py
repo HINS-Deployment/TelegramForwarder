@@ -258,12 +258,16 @@ class _AccountProvider(dav_provider.DAVProvider):
             for cid in ids_to_try:
                 try:
                     msgs = []
+                    total = 0
                     async for msg in client.iter_messages(cid, limit=1000):
+                        total += 1
                         if msg.media and not hasattr(msg, 'action'):
                             msgs.append(msg)
+                    logger.info(f"MTProto 尝试 chat_id={cid}: 共 {total} 条消息, {len(msgs)} 个媒体文件")
                     if msgs:
                         return msgs
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"MTProto 尝试 chat_id={cid} 失败: {e}")
                     continue
             return []
 
