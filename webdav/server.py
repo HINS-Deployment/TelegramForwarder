@@ -214,7 +214,7 @@ class _AccountProvider(dav_provider.DAVProvider):
             }))
         return files
 
-    def _get_files(self, chat_id, client, bot_token=None, api_base_url=None):
+    def _get_files(self, chat_id, bot_token=None, api_base_url=None):
         """获取缓存的文件列表，带 30 秒 TTL。"""
         import time
         now = time.time()
@@ -232,31 +232,40 @@ class _AccountProvider(dav_provider.DAVProvider):
             # 使用 Bot API HTTP 获取（走代理域名）
             files = self._get_files_via_bot_api(effective_bot_token, api_base_url, chat_id)
             logger.info(f"WebDAV 聊天 {chat_id} Bot API 扫描完成，共 {len(files)} 个媒体文件")
+            # Bot API 无法获取历史消息，如果没数据则降级到 MTProto（用 bot client）
+            if not files:
+                logger.info(f"Bot API 无数据，降级到 MTProto 扫描...")
+                files = self._get_files_via_mtproto(self.bot_client, chat_id)
         else:
-            # 使用 Telethon MTProto 获取
-            import asyncio
-            async def _fetch():
-                msgs = []
-                async for msg in client.iter_messages(chat_id, limit=1000):
-                    if msg.media and not hasattr(msg, 'action'):
-                        msgs.append(msg)
-                return msgs
-            future = asyncio.run_coroutine_threadsafe(_fetch(), self._main_loop)
-            messages = future.result(timeout=60)
-            files = []
-            name_counts = {}
-            for i, msg in enumerate(messages):
-                base = _get_filename(msg, i)
-                if base in name_counts:
-                    name_counts[base] += 1
-                    name = f"{name_counts[base]}_{base}"
-                else:
-                    name_counts[base] = 0
-                    name = base
-                files.append((name, msg))
-            logger.info(f"WebDAV 聊天 {chat_id} MTProto 扫描完成，共 {len(files)} 个媒体文件")
+            # 使用 Telethon MTProto 获取（用 bot client）
+            files = self._get_files_via_mtproto(self.bot_client, chat_id)
 
         self._cache[chat_id] = (files, now)
+        return files
+
+    def _get_files_via_mtproto(self, client, chat_id):
+        """通过 Telethon MTProto 获取聊天中的媒体文件列表（全量历史）。"""
+        import asyncio
+        async def _fetch():
+            msgs = []
+            async for msg in client.iter_messages(chat_id, limit=1000):
+                if msg.media and not hasattr(msg, 'action'):
+                    msgs.append(msg)
+            return msgs
+        future = asyncio.run_coroutine_threadsafe(_fetch(), self._main_loop)
+        messages = future.result(timeout=60)
+        files = []
+        name_counts = {}
+        for i, msg in enumerate(messages):
+            base = _get_filename(msg, i)
+            if base in name_counts:
+                name_counts[base] += 1
+                name = f"{name_counts[base]}_{base}"
+            else:
+                name_counts[base] = 0
+                name = base
+            files.append((name, msg))
+        logger.info(f"WebDAV 聊天 {chat_id} MTProto 扫描完成，共 {len(files)} 个媒体文件")
         return files
 
     def get_resource_inst(self, path, environ):
@@ -272,7 +281,7 @@ class _AccountProvider(dav_provider.DAVProvider):
 
         logger.info(f"WebDAV 请求: path={path!r} chat_id={chat_id}")
 
-        files = self._get_files(chat_id, client, bot_token=bot_token, api_base_url=api_base_url)
+        files = self._get_files(chat_id, bot_token=bot_token, api_base_url=api_base_url)
 
         if path == '/' or path == '':
             logger.info(f"WebDAV 返回根目录 ({len(files)} 个文件)")
