@@ -506,7 +506,7 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
 
     def get_etag(self):
         if self._file_id:
-            return self._file_id
+            return str(self._file_id)
         return str(self.msg.id) if self.msg else self._filename
 
     def support_etag(self):
@@ -771,10 +771,10 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
             raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR,
                                      "Telethon 上传失败")
 
-    def delete(self):
-        """删除文件（从聊天中删除对应消息）"""
+    def handle_delete(self):
+        """处理 DELETE 请求（返回 True 表示已处理，wsgidav 不再递归）"""
         if not self.msg and not self._file_id and not self._upload_msg_id:
-            return
+            return False
         try:
             # 优先使用上传时记录的消息信息
             msg_id = self._upload_msg_id
@@ -788,8 +788,8 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
                     msg_id = self.msg.id
 
             if not msg_id:
-                raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR,
-                                         "No message ID available for deletion")
+                logger.warning(f"无法删除 {self._filename}：无消息 ID")
+                return False
 
             if self._api_base_url and self._bot_token:
                 # Bot API 删除
@@ -802,12 +802,13 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
                 from webdav.server import invalidate_cache
                 invalidate_cache(self.chat_id)
                 access_logger.info(f"删除文件 {self._filename} (消息ID {msg_id}) (via Bot API)")
+                return True
             else:
-                raise dav_error.DAVError(dav_error.HTTP_METHOD_NOT_ALLOWED,
-                                         "Deletion requires Bot API configuration")
+                logger.warning(f"无法删除 {self._filename}：未配置 Bot API")
+                return False
         except Exception as e:
             logger.error(f"删除文件 {self._filename} 失败: {e}")
-            raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR, str(e))
+            return False
 
 
 class TelegramDAVRoot(dav_provider.DAVCollection):
