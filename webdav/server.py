@@ -93,11 +93,13 @@ class _WebDAVServer:
             return
 
         def _make_app():
+            global _active_provider
+            _active_provider = _AccountProvider(self.user_client, self.bot_client, self._main_loop, self._global_bot_token)
             config = {
                 'host': WEBDAV_HOST,
                 'port': WEBDAV_PORT,
                 'provider_mapping': {
-                    '/': _AccountProvider(self.user_client, self.bot_client, self._main_loop, self._global_bot_token),
+                    '/': _active_provider,
                 },
                 'http_authenticator': {
                     'accept_basic': False,
@@ -151,6 +153,10 @@ class _AccountProvider(dav_provider.DAVProvider):
         self._main_loop = main_loop
         self._global_bot_token = global_bot_token
         self._cache = {}  # chat_id -> (files, timestamp)
+
+    def invalidate_cache(self, chat_id):
+        """清除指定聊天的缓存"""
+        self._cache.pop(chat_id, None)
 
     def _get_files_via_bot_api(self, bot_token, api_base_url, chat_id):
         """通过 Bot API HTTP 获取聊天中的媒体文件列表（走代理域名，不走系统代理）。"""
@@ -315,11 +321,20 @@ class _AccountProvider(dav_provider.DAVProvider):
 
 # 全局管理器实例
 _webdav_server = None
+# 活跃的 provider 实例，供 invalidate_cache 调用
+_active_provider = None
 
 
 def get_webdav_server():
     global _webdav_server
     return _webdav_server
+
+
+def invalidate_cache(chat_id):
+    """清除指定聊天的文件列表缓存"""
+    global _active_provider
+    if _active_provider:
+        _active_provider.invalidate_cache(chat_id)
 
 
 def init_webdav_server(user_client, bot_client):

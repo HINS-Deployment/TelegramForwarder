@@ -798,6 +798,9 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
                     'chat_id': int(bot_chat_id) if bot_chat_id else int(chat_id),
                     'message_id': int(msg_id),
                 })
+                # 清除缓存，下次请求重新扫描
+                from webdav.server import invalidate_cache
+                invalidate_cache(self.chat_id)
                 access_logger.info(f"删除文件 {self._filename} (消息ID {msg_id}) (via Bot API)")
             else:
                 raise dav_error.DAVError(dav_error.HTTP_METHOD_NOT_ALLOWED,
