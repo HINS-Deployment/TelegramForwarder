@@ -210,7 +210,7 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
                 self._content = _run_async(self.client, _fetch)
                 access_logger.info(f"下载文件 {self._filename} ({len(self._content)} 字节)")
             except Exception as e:
-                logger.error(f"下载文件 {self._filename} 失败: {e}")
+                logger.error(f"下载文件 {self._filename} 失败: {e}", exc_info=True)
                 raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR, str(e))
         return io.BytesIO(self._content) if self._content else io.BytesIO()
 
@@ -309,7 +309,8 @@ class TelegramDAVRoot(dav_provider.DAVCollection):
         if f:
             access_logger.info(f"访问文件 /{name}")
             return TelegramDAVFile(
-                f'/{name}', self.environ, f.msg, f.client, f.chat_id, name
+                f'/{name}', self.environ, f.msg, f.client, f.chat_id, name,
+                bot_token=self._bot_token, api_base_url=self._api_base_url
             )
         return None
 
@@ -318,7 +319,8 @@ class TelegramDAVRoot(dav_provider.DAVCollection):
         result = []
         for name, f in self._name_map.items():
             result.append(TelegramDAVFile(
-                f'/{name}', self.environ, f.msg, f.client, f.chat_id, name
+                f'/{name}', self.environ, f.msg, f.client, f.chat_id, name,
+                bot_token=self._bot_token, api_base_url=self._api_base_url
             ))
         return result
 
