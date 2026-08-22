@@ -215,7 +215,7 @@ class _AccountProvider(dav_provider.DAVProvider):
         return files
 
     def _get_files(self, chat_id, bot_token=None, api_base_url=None):
-        """获取缓存的文件列表，带 5 分钟 TTL。"""
+        """获取缓存的文件列表（仅 MTProto），带 5 分钟 TTL。"""
         import time
         now = time.time()
         if chat_id in self._cache:
@@ -224,22 +224,7 @@ class _AccountProvider(dav_provider.DAVProvider):
                 return files
 
         logger.info(f"WebDAV 扫描聊天 {chat_id} 的媒体文件...")
-
-        # 有效 bot_token：账号指定或全局配置
-        effective_bot_token = bot_token or self._global_bot_token
-
-        if api_base_url and effective_bot_token:
-            # 使用 Bot API HTTP 获取（走代理域名）
-            files = self._get_files_via_bot_api(effective_bot_token, api_base_url, chat_id)
-            logger.info(f"WebDAV 聊天 {chat_id} Bot API 扫描完成，共 {len(files)} 个媒体文件")
-            # Bot API 无法获取历史消息，如果没数据则降级到 MTProto（用 user client）
-            if not files:
-                logger.info(f"Bot API 无数据，降级到 MTProto 扫描...")
-                files = self._get_files_via_mtproto(self.user_client, chat_id)
-        else:
-            # 使用 Telethon MTProto 获取（用 user client）
-            files = self._get_files_via_mtproto(self.user_client, chat_id)
-
+        files = self._get_files_via_mtproto(self.user_client, chat_id)
         self._cache[chat_id] = (files, now)
         return files
 

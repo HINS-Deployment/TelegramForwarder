@@ -412,6 +412,9 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         self._bot_token = bot_token
         self._api_base_url = api_base_url
         self._file_id = file_id or (msg.get('file_id') if isinstance(msg, dict) else None)
+        # 上传后记录的消息信息（用于删除操作）
+        self._upload_msg_id = None
+        self._upload_chat_id = None
 
     def _bot_req(self, method, params=None, files=None, json=None):
         """发送 Bot API HTTP 请求（不走系统代理）。"""
@@ -751,6 +754,9 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         result = _run_async(self.client, _do_upload, timeout=3600)
         if result:
             _increment_telethon_count()
+            # 保存上传消息信息（用于删除）
+            self._upload_msg_id = result.id
+            self._upload_chat_id = getattr(result, 'chat_id', None) or self.chat_id
             # 尝试从结果中提取 file_id
             try:
                 media = result.media
@@ -767,21 +773,30 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
 
     def delete(self):
         """删除文件（从聊天中删除对应消息）"""
-        if not self.msg and not self._file_id:
+        if not self.msg and not self._file_id and not self._upload_msg_id:
             return
         try:
-            if self._file_id and self._api_base_url and self._bot_token:
-                # Bot API 删除
-                msg_id = None
-                chat_id = self.chat_id
+            # 优先使用上传时记录的消息信息
+            msg_id = self._upload_msg_id
+            chat_id = self._upload_chat_id or self.chat_id
+
+            if not msg_id and self.msg:
                 if isinstance(self.msg, dict):
                     msg_id = self.msg.get('message_id')
                     chat_id = self.msg.get('chat_id') or chat_id
-                elif self.msg:
+                else:
                     msg_id = self.msg.id
+
+            if not msg_id:
+                raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR,
+                                         "No message ID available for deletion")
+
+            if self._api_base_url and self._bot_token:
+                # Bot API 删除
+                bot_chat_id = self._get_bot_api_chat_id()
                 self._bot_req('deleteMessage', json={
-                    'chat_id': int(chat_id),
-                    'message_id': msg_id,
+                    'chat_id': int(bot_chat_id) if bot_chat_id else int(chat_id),
+                    'message_id': int(msg_id),
                 })
                 access_logger.info(f"删除文件 {self._filename} (消息ID {msg_id}) (via Bot API)")
             else:
