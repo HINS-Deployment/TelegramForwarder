@@ -2356,18 +2356,16 @@ async def _resolve_chat(client, chat_input: str) -> tuple:
 
 def _get_id_variants(raw_id: str) -> list:
     """生成聊天 ID 的多种格式，用于尝试解析。"""
-    variants = [raw_id]
     num = abs(int(raw_id))
-    # 如果是负数，尝试添加 -100 前缀（超级群组/频道）
+    # 如果是负数，优先尝试 -100 前缀（超级群组/频道），再试原 ID
     if raw_id.startswith('-'):
         if not raw_id.startswith('-100'):
-            variants.append(f'-100{num}')
+            variants = [f'-100{num}', raw_id]
         else:
-            variants.append(f'-{num}')
+            variants = [raw_id, f'-{num}']
     # 正数（普通群组/用户）
     else:
-        variants.append(f'-{num}')
-        variants.append(f'-100{num}')
+        variants = [raw_id, f'-{num}', f'-100{num}']
     return variants
 
 
