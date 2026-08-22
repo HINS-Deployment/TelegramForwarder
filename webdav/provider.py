@@ -204,8 +204,67 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
     def support_etag(self):
         return True
 
+    def _get_file_id_via_bot_api(self):
+        """通过 Bot API forwardMessage 获取 file_id，缓存到 _file_id。"""
+        if not self._api_base_url or not self._bot_token or not self.msg:
+            return None
+        try:
+            import requests
+            from_chat_id = int(self.msg.chat_id) if hasattr(self.msg, 'chat_id') else self.chat_id
+            msg_id = self.msg.id if hasattr(self.msg, 'id') else None
+            if not msg_id:
+                return None
+
+            # 转发到源聊天（获取 file_id），然后立即删除
+            base = self._api_base_url.rstrip('/')
+            resp = requests.post(f"{base}/bot{self._bot_token}/forwardMessage", json={
+                'chat_id': from_chat_id,
+                'from_chat_id': from_chat_id,
+                'message_id': msg_id,
+            }, timeout=30, proxies={'http': None, 'https': None})
+            resp.raise_for_status()
+            data = resp.json()
+            if not data.get('ok'):
+                logger.warning(f"forwardMessage 获取 file_id 失败: {data.get('description', 'unknown')}")
+                return None
+
+            result = data['result']
+            # 提取 file_id（document / photo / video / audio）
+            doc = result.get('document') or result.get('video') or result.get('audio')
+            if not doc:
+                photo = result.get('photo')
+                if isinstance(photo, list) and photo:
+                    doc = photo[-1]
+            if not doc:
+                return None
+
+            file_id = doc.get('file_id')
+            if not file_id:
+                return None
+
+            # 删除刚转发的消息
+            fwd_msg_id = result.get('message_id')
+            if fwd_msg_id:
+                try:
+                    requests.post(f"{base}/bot{self._bot_token}/deleteMessage", json={
+                        'chat_id': from_chat_id,
+                        'message_id': fwd_msg_id,
+                    }, timeout=10, proxies={'http': None, 'https': None})
+                except Exception:
+                    pass
+
+            self._file_id = file_id
+            access_logger.info(f"通过 Bot API 获取 file_id 成功: {file_id[:20]}...")
+            return file_id
+        except Exception as e:
+            logger.warning(f"获取 Bot API file_id 失败: {e}")
+            return None
+
     def get_content(self):
         """下载文件内容（仅 Bot API，不走 Telethon）"""
+        if not self._file_id:
+            self._get_file_id_via_bot_api()
+
         if not self._file_id or not self._api_base_url or not self._bot_token:
             raise dav_error.DAVError(dav_error.HTTP_NOT_FOUND, "No Bot API file_id available")
 
