@@ -2459,6 +2459,10 @@ async def handle_webdav_add_command(event, command, parts):
 
     chat_id = str(entity.id)
     chat_name = getattr(entity, 'title', 'Private Chat')
+    # 频道/超级群组使用完整 peer ID（含 -100 前缀）
+    from telethon.tl.types import Channel
+    if isinstance(entity, Channel):
+        chat_id = f'-100{abs(entity.id)}'
 
     # 检查 bot 是否在聊天中且有管理员权限
     bot_me = await bot_client.get_me()

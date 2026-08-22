@@ -317,8 +317,13 @@ class _AccountProvider(dav_provider.DAVProvider):
                 return TelegramDAVFile(path, environ, msg, client, chat_id, name,
                                        bot_token=bot_token, api_base_url=api_base_url)
 
-        # 文件不存在时，如果是 PUT 请求，返回一个可写入的空资源
-        # 这由 create_empty_resource 处理，但 get_resource_inst 可能被先调用
+        # 文件不存在：PUT 请求直接返回可写空资源
+        method = environ.get('REQUEST_METHOD', '')
+        if method == 'PUT':
+            logger.info(f"WebDAV PUT 新文件: {name!r}")
+            return TelegramDAVFile(path, environ, None, client, chat_id, name,
+                                   bot_token=bot_token, api_base_url=api_base_url)
+
         logger.warning(f"WebDAV 文件未找到: {path!r}")
         return None
 

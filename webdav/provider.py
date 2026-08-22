@@ -458,6 +458,26 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         size = self._get_file_size()
         return size > BOT_API_SIZE_LIMIT
 
+    def _get_bot_api_chat_id(self):
+        """获取 Bot API 兼容的 chat_id（频道需要 -100 前缀）。"""
+        cid = self.chat_id
+        # 优先从消息获取（已有消息时最为准确）
+        if self.msg and hasattr(self.msg, 'chat_id'):
+            try:
+                return int(self.msg.chat_id)
+            except (ValueError, TypeError):
+                pass
+        # 正数 ID 可能是频道，尝试添加 -100 前缀
+        if cid > 0 and not str(cid).startswith('-100'):
+            try:
+                from telethon.tl.types import Channel
+                entity = _run_async(self.client, lambda: self.client.get_entity(cid))
+                if isinstance(entity, Channel):
+                    return int(f'-100{abs(cid)}')
+            except Exception:
+                pass
+        return cid
+
     def get_content_type(self):
         if self._file_id:
             return 'application/octet-stream'
@@ -683,7 +703,11 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
             url = f"{self._api_base_url.rstrip('/')}/bot{self._bot_token}/sendDocument"
             import requests
             files = {'document': (self._filename, data)}
-            resp = requests.post(url, files=files, timeout=120, proxies={'http': None, 'https': None})
+            # 必须指定 chat_id，否则 Bot API 不知道发到哪
+            bot_chat_id = self._get_bot_api_chat_id()
+            data_form = {'chat_id': str(bot_chat_id)}
+            resp = requests.post(url, files=files, data=data_form, timeout=120,
+                                 proxies={'http': None, 'https': None})
             resp.raise_for_status()
             result = resp.json()
             if result.get('ok'):
