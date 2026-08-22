@@ -232,13 +232,13 @@ class _AccountProvider(dav_provider.DAVProvider):
             # 使用 Bot API HTTP 获取（走代理域名）
             files = self._get_files_via_bot_api(effective_bot_token, api_base_url, chat_id)
             logger.info(f"WebDAV 聊天 {chat_id} Bot API 扫描完成，共 {len(files)} 个媒体文件")
-            # Bot API 无法获取历史消息，如果没数据则降级到 MTProto（用 bot client）
+            # Bot API 无法获取历史消息，如果没数据则降级到 MTProto（用 user client）
             if not files:
                 logger.info(f"Bot API 无数据，降级到 MTProto 扫描...")
-                files = self._get_files_via_mtproto(self.bot_client, chat_id)
+                files = self._get_files_via_mtproto(self.user_client, chat_id)
         else:
-            # 使用 Telethon MTProto 获取（用 bot client）
-            files = self._get_files_via_mtproto(self.bot_client, chat_id)
+            # 使用 Telethon MTProto 获取（用 user client）
+            files = self._get_files_via_mtproto(self.user_client, chat_id)
 
         self._cache[chat_id] = (files, now)
         return files
