@@ -73,6 +73,14 @@ def _cache_set(key, path, done=False):
     }
 
 
+def _cache_extend(key):
+    """延长缓存 TTL。"""
+    if not key or key not in _download_cache:
+        return
+    import time
+    _download_cache[key]["expires"] = time.time() + DOWNLOAD_CACHE_TTL
+
+
 def _cache_cleanup(key=None):
     """清理单个或全部过期缓存。"""
     import time
@@ -235,12 +243,19 @@ class _TelethonStream:
 
         # 后台下载协程：iter_download → 写入临时文件
         async def _producer():
+            import time
+            _last_extend = time.time()
             try:
                 async for chunk in client.iter_download(msg.media):
                     with self._lock:
                         self._file.write(chunk)
                         self._write_pos += len(chunk)
                         self._file.flush()
+                    # 下载中定期刷新缓存 TTL，防止大文件下载超时过期
+                    now = time.time()
+                    if now - _last_extend > 60:
+                        _cache_set(cache_key, self._path, done=False)
+                        _last_extend = now
                 self._done = True
                 # 更新缓存标记为已完成
                 _cache_set(cache_key, self._path, done=True)
@@ -249,6 +264,8 @@ class _TelethonStream:
                 self._done = True
 
         self._task = asyncio.run_coroutine_threadsafe(_producer(), self._loop)
+        # 读取侧的 TTL 刷新
+        self._last_read_extend = 0.0
 
     def _wait_data(self, needed):
         """等待缓存中有足够数据，返回可读字节数。"""
@@ -263,6 +280,11 @@ class _TelethonStream:
                 available = self._write_pos - self._read_pos
                 if available >= needed:
                     return available
+            # 等待中定期刷新缓存 TTL
+            now = time.time()
+            if now - self._last_read_extend > 60:
+                _cache_extend(self._cache_key)
+                self._last_read_extend = now
             if time.time() - start > self._timeout:
                 raise TimeoutError("下载流读取超时")
             time.sleep(0.1)
@@ -335,21 +357,34 @@ class _TelethonStream:
 
 
 class _StreamFile:
-    """流式文件读取，读取后自动删除临时文件。"""
+    """流式文件读取，缓存文件不自动删除。"""
 
-    def __init__(self, path):
+    def __init__(self, path, cache_key=None):
         self._path = path
+        self._cache_key = cache_key
         self._file = open(path, 'rb')
+        self._last_extend = 0.0
 
     def read(self, size=-1):
+        import time
+        # 缓存文件读取中定期刷新 TTL
+        if self._cache_key:
+            now = time.time()
+            if now - self._last_extend > 60:
+                _cache_extend(self._cache_key)
+                self._last_extend = now
         return self._file.read(size)
 
     def close(self):
         try:
             self._file.close()
         finally:
-            if os.path.exists(self._path):
-                os.unlink(self._path)
+            # 缓存文件不删除，由 _cache_cleanup 管理
+            if not self._cache_key and os.path.exists(self._path):
+                try:
+                    os.unlink(self._path)
+                except Exception:
+                    pass
 
     def __iter__(self):
         return self._file
@@ -564,7 +599,7 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
             if cached:
                 done = cached.get("done", False)
                 access_logger.info(f"复用缓存文件 {self._filename} (已完成={done})")
-                return _StreamFile(cached["path"])
+                return _StreamFile(cached["path"], cache_key=key)
 
         try:
             _check_telethon_rate_limit()
