@@ -122,10 +122,20 @@ class _WebDAVServer:
         def _run():
             try:
                 app = _make_app()
-                # 使用标准库 wsgiref 作为 WSGI 服务器
-                from wsgiref.simple_server import make_server
-                self._server = make_server(WEBDAV_HOST, WEBDAV_PORT, app)
-                logger.info(f"WebDAV 服务器已启动在 {WEBDAV_HOST}:{WEBDAV_PORT}")
+                # 使用线程化 WSGI 服务器，避免单线程阻塞
+                from wsgiref.simple_server import WSGIServer, WSGIRequestHandler
+                from socketserver import ThreadingMixIn
+
+                class ThreadedWSGIServer(ThreadingMixIn, WSGIServer):
+                    """支持并发的 WSGI 服务器"""
+                    daemon_threads = True
+                    allow_reuse_address = True
+                    request_queue_size = 100
+
+                server = ThreadedWSGIServer((WEBDAV_HOST, WEBDAV_PORT), WSGIRequestHandler)
+                server.set_app(app)
+                self._server = server
+                logger.info(f"WebDAV 服务器已启动在 {WEBDAV_HOST}:{WEBDAV_PORT} (线程化)")
                 self._server.serve_forever()
             except Exception as e:
                 logger.error(f"WebDAV 服务器异常: {e}", exc_info=True)
