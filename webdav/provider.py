@@ -702,6 +702,8 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
         if len(data) > BOT_API_SIZE_LIMIT:
             logger.info(f"上传文件 {self._filename} ({len(data)} 字节) 超过 {BOT_API_SIZE_LIMIT // 1024 // 1024}MB，直接走 Telethon")
             self._upload_via_telethon(data)
+            from webdav.server import invalidate_cache
+            invalidate_cache(self.chat_id)
             return
 
         try:
@@ -721,6 +723,8 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
                 if doc.get('file_id'):
                     self._file_id = doc['file_id']
                 access_logger.info(f"上传文件 {self._filename} ({len(data)} 字节) (via Bot API)")
+                from webdav.server import invalidate_cache
+                invalidate_cache(self.chat_id)
                 return
 
             # Bot API 上传失败，尝试 Telethon 回退
@@ -731,6 +735,8 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
             logger.warning(f"Bot API 上传异常 ({e})，回退到 Telethon")
 
         self._upload_via_telethon(data)
+        from webdav.server import invalidate_cache
+        invalidate_cache(self.chat_id)
 
     def _upload_via_telethon(self, data):
         """通过 Telethon MTProto 上传大文件，计入全局冷却。"""
