@@ -683,12 +683,15 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
 
     def begin_write(self, content_type=None):
         """上传文件"""
+        logger.info(f"begin_write: {self._filename} (content_type={content_type})")
         self._upload_buffer = _WriteBuffer()
         return self._upload_buffer
 
     def end_write(self, with_errors):
         """完成上传，发送到 Telegram（>20MB 直接走 Telethon，否则走 Bot API）。"""
+        logger.info(f"end_write: {self._filename} (with_errors={with_errors}, has_buffer={hasattr(self, '_upload_buffer')})")
         if with_errors or not hasattr(self, '_upload_buffer'):
+            logger.info(f"end_write 跳过: with_errors={with_errors}, buffer={hasattr(self, '_upload_buffer')}")
             return
         data = self._upload_buffer.getvalue()
         if not self._api_base_url or not self._bot_token:
