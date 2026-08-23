@@ -15,7 +15,7 @@ WEBDAV_PORT = int(os.getenv('WEBDAV_PORT', '8080'))
 
 
 class AuthMiddleware:
-    """HTTP Basic Auth 中间件，校验 WebDAV 账号"""
+    """HTTP Basic Auth 中间件，校验 WebDAV 账号，同时预读取 PUT 请求体避免阻塞。"""
 
     def __init__(self, app):
         self.app = app
@@ -69,6 +69,29 @@ class AuthMiddleware:
         environ['webdav.account'] = account
         # 同时设置 REMOTE_USER，让 WsgiDAVApp 内部认证通过
         environ['REMOTE_USER'] = account.username
+
+        # 预读取 PUT 请求体，避免 wsgidav 在 wsgi.input.read() 上阻塞
+        if environ.get('REQUEST_METHOD') == 'PUT':
+            content_length = environ.get('CONTENT_LENGTH')
+            if content_length:
+                cl = int(content_length)
+                if cl > 0:
+                    body = environ['wsgi.input'].read(cl)
+                    from io import BytesIO
+                    environ['wsgi.input'] = BytesIO(body)
+            elif environ.get('HTTP_TRANSFER_ENCODING') == 'chunked':
+                # 逐块读取直到结束
+                chunks = []
+                while True:
+                    chunk = environ['wsgi.input'].read(65536)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                body = b''.join(chunks)
+                from io import BytesIO
+                environ['wsgi.input'] = BytesIO(body)
+                environ['CONTENT_LENGTH'] = str(len(body))
+
         return self.app(environ, start_response)
 
 
