@@ -2370,27 +2370,31 @@ def _get_id_variants(raw_id: str) -> list:
 
 
 async def _check_bot_admin(client, chat_entity, bot_id: int) -> bool:
-    """检查 bot 是否在聊天中且有管理员权限。"""
+    """检查 bot 是否在聊天中（普通成员也算在聊天中）。"""
+    from telethon.tl.types import User, Chat
+    from telethon.tl.functions.channels import GetParticipantRequest
+
+    # 私聊（User）无需检查，视为已在聊天中
+    if isinstance(chat_entity, User):
+        return True
+
     try:
-        from telethon.tl.functions.channels import GetParticipantRequest
-        from telethon.tl.types import (
-            ChannelParticipantAdmin, ChannelParticipantCreator,
-            ChatParticipantAdmin, ChatParticipantCreator,
-        )
-        participant = await client(GetParticipantRequest(chat_entity, bot_id))
-        p = participant.participant
-        if isinstance(p, (ChannelParticipantAdmin, ChannelParticipantCreator,
-                          ChatParticipantAdmin, ChatParticipantCreator)):
-            return True
-        # 普通成员也算在聊天中
+        # 超级群组/频道：能查到参与者即表示 bot 已在聊天中
+        await client(GetParticipantRequest(chat_entity, bot_id))
         return True
     except Exception:
-        # GetParticipantRequest 可能失败，尝试 get_entity 验证
+        pass
+
+    # 普通群组：通过 GetFullChatRequest 检查成员列表
+    if isinstance(chat_entity, Chat):
         try:
-            await client.get_entity(bot_id)
-            return True
+            from telethon.tl.functions.messages import GetFullChatRequest
+            full = await client(GetFullChatRequest(chat_entity.id))
+            return any(u.id == bot_id for u in full.users)
         except Exception:
             return False
+
+    return False
 
 
 async def _add_bot_to_chat(user_client, chat_entity, bot_username: str):
