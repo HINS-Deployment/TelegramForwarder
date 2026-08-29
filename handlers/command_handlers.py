@@ -2407,12 +2407,18 @@ async def _check_bot_admin(client, chat_entity, bot_id: int) -> bool:
     return False
 
 
-async def _add_bot_to_chat(user_client, chat_entity, bot_username: str):
-    """用用户账号将 bot 添加为管理员。"""
+async def _add_bot_to_chat(user_client, bot_client, chat_entity, bot_username: str):
+    """用用户账号将 bot 添加为聊天管理员。
+
+    普通群组：先 AddChatUserRequest 把 bot 加入群，再提升为管理员；
+    频道/超级群组：EditAdminRequest 失败（bot 非成员）时先 InviteToChannelRequest 加入再提升。
+    """
     try:
-        from telethon.tl.functions.channels import EditAdminRequest
-        from telethon.tl.types import ChatAdminRights, InputUser
-        bot_input = await user_client.get_input_entity(bot_username)
+        from telethon.tl.functions.channels import EditAdminRequest, InviteToChannelRequest
+        from telethon.tl.functions.messages import AddChatUserRequest
+        from telethon.tl.types import Chat, Channel
+        # 用 bot 客户端获取 bot 自身的 InputUser，确保 access_hash 正确
+        bot_input = await bot_client.get_input_entity('me')
         rights = ChatAdminRights(
             post_messages=True,
             edit_messages=True,
@@ -2426,8 +2432,24 @@ async def _add_bot_to_chat(user_client, chat_entity, bot_username: str):
             ban_users=False,
             change_info=False,
         )
-        await user_client(EditAdminRequest(chat_entity, bot_input, rights, rank=''))
-        return True
+
+        # 普通群组：先加入，失败（可能已在群中）忽略
+        if isinstance(chat_entity, Chat):
+            try:
+                await user_client(AddChatUserRequest(chat_entity.id, bot_input, fwd_limit=0))
+            except Exception:
+                pass
+
+        try:
+            await user_client(EditAdminRequest(chat_entity, bot_input, rights, rank=''))
+            return True
+        except Exception as e:
+            # 频道/超级群组：bot 还不是成员时先邀请加入再提升
+            if isinstance(chat_entity, Channel) and 'USER_NOT_PARTICIPANT' in str(e):
+                await user_client(InviteToChannelRequest(chat_entity, [bot_input]))
+                await user_client(EditAdminRequest(chat_entity, bot_input, rights, rank=''))
+                return True
+            raise
     except Exception as e:
         logger.error(f"添加 bot 为管理员失败: {e}")
         return False
@@ -2487,7 +2509,7 @@ async def handle_webdav_add_command(event, command, parts):
     if not bot_in_chat:
         # 尝试用 user_client 添加 bot 为管理员
         logger.info(f"bot 不在聊天 {chat_name} 中，尝试添加为管理员...")
-        added = await _add_bot_to_chat(user_client, entity, bot_username)
+        added = await _add_bot_to_chat(user_client, bot_client, entity, bot_username)
         if not added:
             await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
             await reply_and_delete(event,
