@@ -2416,7 +2416,7 @@ async def _add_bot_to_chat(user_client, bot_client, chat_entity, bot_username: s
     try:
         from telethon.tl.functions.channels import EditAdminRequest, InviteToChannelRequest
         from telethon.tl.functions.messages import AddChatUserRequest
-        from telethon.tl.types import Chat, Channel
+        from telethon.tl.types import Chat, Channel, ChatAdminRights
         # 用 bot 客户端获取 bot 自身的 InputUser，确保 access_hash 正确
         bot_input = await bot_client.get_input_entity('me')
         rights = ChatAdminRights(
