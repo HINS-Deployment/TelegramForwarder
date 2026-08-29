@@ -718,7 +718,11 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
             # 大文件直接绕过 Bot API：流式读取临时文件上传，避免整块进内存
             if size > BOT_API_SIZE_LIMIT:
                 logger.info(f"上传文件 {self._filename} ({size} 字节) 超过 {BOT_API_SIZE_LIMIT // 1024 // 1024}MB，直接走 Telethon")
-                self._upload_via_telethon(buffer.get_file(), size)
+                try:
+                    self._upload_via_telethon(buffer.get_file(), size)
+                except Exception:
+                    logger.error(f"端到端上传 {self._filename} 失败 (via Telethon)", exc_info=True)
+                    raise
                 from webdav.server import invalidate_cache
                 invalidate_cache(self.chat_id)
                 return
@@ -782,7 +786,16 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
                 )
             return _inner()
 
-        result = _run_async(self.client, _do_upload, timeout=3600)
+        try:
+            result = _run_async(self.client, _do_upload, timeout=3600)
+        except dav_error.DAVError:
+            raise
+        except Exception as e:
+            logger.error(f"Telethon 上传 {self._filename} 异常: {e}", exc_info=True)
+            raise dav_error.DAVError(
+                dav_error.HTTP_INTERNAL_ERROR,
+                f"Telethon 上传失败: {e}",
+            )
         if result:
             _increment_telethon_count()
             # 保存上传消息信息（用于删除）
