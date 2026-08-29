@@ -2407,18 +2407,27 @@ async def _check_bot_admin(client, chat_entity, bot_id: int) -> bool:
     return False
 
 
-async def _add_bot_to_chat(user_client, bot_client, chat_entity, bot_username: str):
+async def _add_bot_to_chat(user_client, chat_entity, bot_username: str, bot_id: int):
     """用用户账号将 bot 添加为聊天管理员。
 
     普通群组：先 AddChatUserRequest 把 bot 加入群，再提升为管理员；
     频道/超级群组：EditAdminRequest 失败（bot 非成员）时先 InviteToChannelRequest 加入再提升。
+
+    注意：EditAdminRequest 等请求走的是 user_client 连接，必须用用户账号解析 bot 的
+    InputUser（access_hash 需对用户账号有效），不能用 bot_client 自身解析。
     """
     try:
         from telethon.tl.functions.channels import EditAdminRequest, InviteToChannelRequest
         from telethon.tl.functions.messages import AddChatUserRequest
-        from telethon.tl.types import Chat, Channel, ChatAdminRights
-        # 用 bot 客户端获取 bot 自身的 InputUser，确保 access_hash 正确
-        bot_input = await bot_client.get_input_entity('me')
+        from telethon.tl.functions.users import GetUsersRequest
+        from telethon.tl.types import Chat, Channel, ChatAdminRights, InputUser
+
+        if bot_username:
+            bot_input = await user_client.get_input_entity(bot_username)
+        else:
+            users = await user_client(GetUsersRequest([InputUser(bot_id, 0)]))
+            bot_input = await user_client.get_input_entity(users[0])
+
         rights = ChatAdminRights(
             post_messages=True,
             edit_messages=True,
@@ -2509,7 +2518,7 @@ async def handle_webdav_add_command(event, command, parts):
     if not bot_in_chat:
         # 尝试用 user_client 添加 bot 为管理员
         logger.info(f"bot 不在聊天 {chat_name} 中，尝试添加为管理员...")
-        added = await _add_bot_to_chat(user_client, bot_client, entity, bot_username)
+        added = await _add_bot_to_chat(user_client, entity, bot_username, bot_id)
         if not added:
             await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
             await reply_and_delete(event,
