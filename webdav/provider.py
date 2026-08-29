@@ -188,22 +188,37 @@ def _iter_media_messages(client, chat_id: int) -> List[Message]:
 
 
 class _WriteBuffer:
-    """写入缓冲区，close 后仍可读取数据。"""
+    """写入缓冲区（请求体临时落盘），close 后仍可读取数据。"""
     def __init__(self):
-        self._data = b''
+        import tempfile
+        # 超过 8MB 自动落盘，避免大文件全量驻留内存
+        self._tmp = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024)
+        self._size = 0
         self._closed = False
 
     def write(self, data):
         if self._closed:
             raise ValueError("write to closed buffer")
-        self._data += data
+        self._tmp.write(data)
+        self._size += len(data)
         return len(data)
 
     def close(self):
         self._closed = True
+        self._tmp.flush()
 
     def getvalue(self):
-        return self._data
+        self._tmp.seek(0)
+        return self._tmp.read()
+
+    def get_size(self):
+        return self._size
+
+    def get_file(self):
+        """返回已定位到文件头的可读文件对象（供流式上传）。"""
+        self._tmp.flush()
+        self._tmp.seek(0)
+        return self._tmp
 
     def __enter__(self):
         return self
@@ -690,72 +705,79 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
     def end_write(self, with_errors):
         """完成上传，发送到 Telegram（>20MB 直接走 Telethon，否则走 Bot API）。"""
         logger.info(f"end_write: {self._filename} (with_errors={with_errors}, has_buffer={hasattr(self, '_upload_buffer')})")
-        if with_errors or not hasattr(self, '_upload_buffer'):
-            logger.info(f"end_write 跳过: with_errors={with_errors}, buffer={hasattr(self, '_upload_buffer')}")
+        buffer = getattr(self, '_upload_buffer', None)
+        if with_errors or buffer is None:
+            logger.info(f"end_write 跳过: with_errors={with_errors}, buffer={buffer}")
             return
-        data = self._upload_buffer.getvalue()
-        if not self._api_base_url or not self._bot_token:
-            raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR,
-                                     "Bot API not configured for upload")
-
-        # 大文件直接绕过 Bot API
-        if len(data) > BOT_API_SIZE_LIMIT:
-            logger.info(f"上传文件 {self._filename} ({len(data)} 字节) 超过 {BOT_API_SIZE_LIMIT // 1024 // 1024}MB，直接走 Telethon")
-            self._upload_via_telethon(data)
-            from webdav.server import invalidate_cache
-            invalidate_cache(self.chat_id)
-            return
-
         try:
-            # Bot API 上传（不走系统代理）
-            url = f"{self._api_base_url.rstrip('/')}/bot{self._bot_token}/sendDocument"
-            import requests
-            files = {'document': (self._filename, data)}
-            # 必须指定 chat_id，否则 Bot API 不知道发到哪
-            bot_chat_id = self._get_bot_api_chat_id()
-            data_form = {'chat_id': str(bot_chat_id)}
-            resp = requests.post(url, files=files, data=data_form, timeout=120,
-                                 proxies={'http': None, 'https': None})
-            resp.raise_for_status()
-            result = resp.json()
-            if result.get('ok'):
-                doc = result.get('result', {}).get('document', {})
-                if doc.get('file_id'):
-                    self._file_id = doc['file_id']
-                access_logger.info(f"上传文件 {self._filename} ({len(data)} 字节) (via Bot API)")
+            size = buffer.get_size()
+            if not self._api_base_url or not self._bot_token:
+                raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR,
+                                         "Bot API not configured for upload")
+
+            # 大文件直接绕过 Bot API：流式读取临时文件上传，避免整块进内存
+            if size > BOT_API_SIZE_LIMIT:
+                logger.info(f"上传文件 {self._filename} ({size} 字节) 超过 {BOT_API_SIZE_LIMIT // 1024 // 1024}MB，直接走 Telethon")
+                self._upload_via_telethon(buffer.get_file(), size)
                 from webdav.server import invalidate_cache
                 invalidate_cache(self.chat_id)
                 return
 
-            # Bot API 上传失败，尝试 Telethon 回退
-            err_desc = result.get('description', 'unknown')
-            logger.warning(f"Bot API 上传失败 ({err_desc})，回退到 Telethon")
-        except Exception as e:
-            # 如果 Bot API 请求本身异常（如文件过大），也尝试 Telethon 回退
-            logger.warning(f"Bot API 上传异常 ({e})，回退到 Telethon")
+            # 小文件（<=20MB）进内存走 Bot API
+            data = buffer.getvalue()
+            try:
+                # Bot API 上传（不走系统代理）
+                url = f"{self._api_base_url.rstrip('/')}/bot{self._bot_token}/sendDocument"
+                import requests
+                files = {'document': (self._filename, data)}
+                # 必须指定 chat_id，否则 Bot API 不知道发到哪
+                bot_chat_id = self._get_bot_api_chat_id()
+                data_form = {'chat_id': str(bot_chat_id)}
+                resp = requests.post(url, files=files, data=data_form, timeout=120,
+                                     proxies={'http': None, 'https': None})
+                resp.raise_for_status()
+                result = resp.json()
+                if result.get('ok'):
+                    doc = result.get('result', {}).get('document', {})
+                    if doc.get('file_id'):
+                        self._file_id = doc['file_id']
+                    access_logger.info(f"上传文件 {self._filename} ({len(data)} 字节) (via Bot API)")
+                    from webdav.server import invalidate_cache
+                    invalidate_cache(self.chat_id)
+                    return
 
-        self._upload_via_telethon(data)
-        from webdav.server import invalidate_cache
-        invalidate_cache(self.chat_id)
+                # Bot API 上传失败，尝试 Telethon 回退
+                err_desc = result.get('description', 'unknown')
+                logger.warning(f"Bot API 上传失败 ({err_desc})，回退到 Telethon")
+            except Exception as e:
+                # 如果 Bot API 请求本身异常（如文件过大），也尝试 Telethon 回退
+                logger.warning(f"Bot API 上传异常 ({e})，回退到 Telethon")
 
-    def _upload_via_telethon(self, data):
-        """通过 Telethon MTProto 上传大文件，计入全局冷却。"""
+            self._upload_via_telethon(buffer.get_file(), size)
+            from webdav.server import invalidate_cache
+            invalidate_cache(self.chat_id)
+        finally:
+            # 释放缓冲区（临时文件在 GC 时自动删除）
+            try:
+                buffer.close()
+            except Exception:
+                pass
+            self._upload_buffer = None
+
+    def _upload_via_telethon(self, file_obj, size=0):
+        """通过 Telethon MTProto 上传大文件（file_obj 为可读文件对象，流式分片），计入全局冷却。"""
         if not self.client:
             raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR,
                                      "Telethon 客户端不可用，无法上传")
 
         _check_telethon_rate_limit()
-        import io
         from telethon.tl.types import DocumentAttributeFilename
-
-        file_data = io.BytesIO(data)
-        file_data.name = self._filename
 
         def _do_upload():
             async def _inner():
                 return await self.client.send_file(
                     int(self.chat_id),
-                    file_data,
+                    file_obj,
                     attributes=[DocumentAttributeFilename(self._filename)],
                 )
             return _inner()
@@ -775,7 +797,7 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
                     self._file_id = str(media.photo.id)
             except Exception:
                 pass
-            access_logger.info(f"通过 Telethon 上传文件 {self._filename} ({len(data)} 字节) (大文件回退)")
+            access_logger.info(f"通过 Telethon 上传文件 {self._filename} ({size} 字节) (大文件回退)")
         else:
             raise dav_error.DAVError(dav_error.HTTP_INTERNAL_ERROR,
                                      "Telethon 上传失败")

@@ -14,8 +14,66 @@ WEBDAV_HOST = os.getenv('WEBDAV_HOST', '0.0.0.0')
 WEBDAV_PORT = int(os.getenv('WEBDAV_PORT', '8080'))
 
 
+class _BoundedInput:
+    """将 wsgi.input 的读取限制在 Content-Length 内，避免 socket read 越界阻塞。
+
+    wsgiref 的 wsgi.input 是原始 socket rfile，read(size) 会阻塞直到收到
+    size 字节（或连接关闭）。若不限制读取长度，HTTP/1.1 keep-alive 下
+    读取到请求体末尾后会永远等待更多数据。本包装保证最多读到 Content-Length
+    字节，超出立即返回 b''。
+    """
+
+    def __init__(self, rfile, content_length):
+        self._rfile = rfile
+        self._remaining = max(0, int(content_length)) if content_length else 0
+
+    def _cap(self, size):
+        if self._remaining <= 0:
+            return 0
+        if size is None or size < 0 or size > self._remaining:
+            return self._remaining
+        return size
+
+    def read(self, size=-1):
+        n = self._cap(size)
+        if n == 0:
+            return b''
+        data = self._rfile.read(n)
+        self._remaining -= len(data)
+        return data
+
+    def readline(self, size=-1):
+        n = self._cap(size)
+        if n == 0:
+            return b''
+        data = self._rfile.readline(n)
+        self._remaining -= len(data)
+        return data
+
+    def readlines(self, hint=-1):
+        lines = []
+        while self._remaining > 0:
+            line = self.readline()
+            if not line:
+                break
+            lines.append(line)
+        return lines
+
+    def close(self):
+        pass
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        data = self.read(65536)
+        if not data:
+            raise StopIteration
+        return data
+
+
 class AuthMiddleware:
-    """HTTP Basic Auth 中间件，校验 WebDAV 账号，同时预读取 PUT 请求体避免阻塞。"""
+    """HTTP Basic Auth 中间件，校验 WebDAV 账号，并将请求体读取限制在 Content-Length 内避免阻塞。"""
 
     def __init__(self, app):
         self.app = app
@@ -70,27 +128,27 @@ class AuthMiddleware:
         # 同时设置 REMOTE_USER，让 WsgiDAVApp 内部认证通过
         environ['REMOTE_USER'] = account.username
 
-        # 预读取 PUT 请求体，避免 wsgidav 在 wsgi.input.read() 上阻塞
-        if environ.get('REQUEST_METHOD') == 'PUT':
+        # 限制请求体读取长度，避免 socket read 越界阻塞（大文件流式读取，不进内存）
+        if environ.get('REQUEST_METHOD') in ('PUT', 'POST', 'COPY', 'MOVE', 'MKCOL'):
             content_length = environ.get('CONTENT_LENGTH')
-            if content_length:
-                cl = int(content_length)
-                if cl > 0:
-                    body = environ['wsgi.input'].read(cl)
-                    from io import BytesIO
-                    environ['wsgi.input'] = BytesIO(body)
+            try:
+                cl = int(content_length) if content_length else 0
+            except ValueError:
+                cl = 0
+            if cl > 0:
+                environ['wsgi.input'] = _BoundedInput(environ['wsgi.input'], cl)
             elif environ.get('HTTP_TRANSFER_ENCODING') == 'chunked':
-                # 逐块读取直到结束
-                chunks = []
+                # chunked 无固定长度，逐块读取到临时文件（超阈值自动落盘）
+                import tempfile
+                spool = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024)
                 while True:
                     chunk = environ['wsgi.input'].read(65536)
                     if not chunk:
                         break
-                    chunks.append(chunk)
-                body = b''.join(chunks)
-                from io import BytesIO
-                environ['wsgi.input'] = BytesIO(body)
-                environ['CONTENT_LENGTH'] = str(len(body))
+                    spool.write(chunk)
+                environ['CONTENT_LENGTH'] = str(spool.tell())
+                spool.seek(0)
+                environ['wsgi.input'] = spool
 
         return self.app(environ, start_response)
 
@@ -155,7 +213,11 @@ class _WebDAVServer:
                     allow_reuse_address = True
                     request_queue_size = 100
 
-                server = ThreadedWSGIServer((WEBDAV_HOST, WEBDAV_PORT), WSGIRequestHandler)
+                class WebDAVRequestHandler(WSGIRequestHandler):
+                    """HTTP/1.1 请求处理器：支持 Expect: 100-continue，避免大文件上传挂起。"""
+                    protocol_version = "HTTP/1.1"
+
+                server = ThreadedWSGIServer((WEBDAV_HOST, WEBDAV_PORT), WebDAVRequestHandler)
                 server.set_app(app)
                 self._server = server
                 logger.info(f"WebDAV 服务器已启动在 {WEBDAV_HOST}:{WEBDAV_PORT} (线程化)")
