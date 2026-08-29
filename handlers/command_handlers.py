@@ -2378,12 +2378,22 @@ async def _check_bot_admin(client, chat_entity, bot_id: int) -> bool:
     if isinstance(chat_entity, User):
         return True
 
+    # 超级群组/频道：能查到参与者即表示 bot 已在聊天中。
+    # 注意：传入的实体通常是用用户账号解析的，私密频道的 access_hash 与 bot 账号
+    # 不一致，直接用会导致 GetParticipantRequest 失败。因此优先用 bot 客户端按
+    # 聊天 ID 从自身缓存解析实体，确保 access_hash 匹配 bot 账号。
     try:
-        # 超级群组/频道：能查到参与者即表示 bot 已在聊天中
-        await client(GetParticipantRequest(chat_entity, bot_id))
-        return True
+        input_chat = await client.get_input_entity(chat_entity.id)
     except Exception:
-        pass
+        input_chat = None
+    if input_chat is None:
+        input_chat = chat_entity
+
+    try:
+        await client(GetParticipantRequest(input_chat, bot_id))
+        return True
+    except Exception as e:
+        logger.debug(f"检查 bot 是否在聊天中失败: {e}")
 
     # 普通群组：通过 GetFullChatRequest 检查成员列表
     if isinstance(chat_entity, Chat):
@@ -2416,7 +2426,7 @@ async def _add_bot_to_chat(user_client, chat_entity, bot_username: str):
             ban_users=False,
             change_info=False,
         )
-        await user_client(EditAdminRequest(chat_entity, bot_input, rights))
+        await user_client(EditAdminRequest(chat_entity, bot_input, rights, rank=''))
         return True
     except Exception as e:
         logger.error(f"添加 bot 为管理员失败: {e}")
