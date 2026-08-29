@@ -2441,6 +2441,81 @@ async def _check_user_add_admin_rights(user_client, chat_entity):
         return False, f"无法确认你的账号在该频道的权限（请确认你已加入该频道且是管理员）：{e}"
 
 
+async def _build_bot_admin_rights(user_client, chat_entity):
+    """根据用户账号在当前聊天实际拥有的权限构建 bot 的管理权限。
+
+    Telegram 规定不能授予他人超出自己拥有的权限，否则 EditAdminRequest
+    会返回 "your admin rights do not allow you to do this"。因此这里取
+    用户自身权限的子集，并去掉不适合该聊天类型 / 危险的权限位。
+    """
+    from telethon.tl.types import Channel, Chat, ChannelParticipantCreator, ChatAdminRights
+    from telethon.tl.functions.channels import GetParticipantRequest
+
+    # 创建者默认拥有全部可用权限（不含 add_admins / other）
+    default_rights = dict(
+        change_info=True,
+        post_messages=True,
+        edit_messages=True,
+        delete_messages=True,
+        ban_users=True,
+        invite_users=True,
+        pin_messages=True,
+        add_admins=False,
+        anonymous=False,
+        manage_call=True,
+        other=False,
+    )
+
+    user_rights = None
+    if isinstance(chat_entity, Channel):
+        try:
+            me = await user_client.get_me()
+            part = await user_client(GetParticipantRequest(chat_entity, me.id))
+            p = part.participant
+            if not isinstance(p, ChannelParticipantCreator):
+                r = getattr(p, 'admin_rights', None)
+                if r is not None:
+                    user_rights = dict(
+                        change_info=r.change_info,
+                        post_messages=r.post_messages,
+                        edit_messages=r.edit_messages,
+                        delete_messages=r.delete_messages,
+                        ban_users=r.ban_users,
+                        invite_users=r.invite_users,
+                        pin_messages=r.pin_messages,
+                        add_admins=r.add_admins,
+                        anonymous=r.anonymous,
+                        manage_call=r.manage_call,
+                        other=r.other,
+                    )
+        except Exception as e:
+            logger.debug(f"读取用户管理权限失败，使用默认权限: {e}")
+
+    rights = dict(user_rights if user_rights is not None else default_rights)
+
+    # 频道 / 群组各自不适用的权限位置 False
+    if isinstance(chat_entity, Channel):
+        if getattr(chat_entity, 'megagroup', False):
+            # 超级群组：post/edit 仅适用于广播频道
+            rights['post_messages'] = False
+            rights['edit_messages'] = False
+        else:
+            # 广播频道：ban_users 仅适用于群组
+            rights['ban_users'] = False
+    elif isinstance(chat_entity, Chat):
+        # 普通群组：post/edit/manage_call 不适用
+        rights['post_messages'] = False
+        rights['edit_messages'] = False
+        rights['manage_call'] = False
+
+    # 不授予 bot 添加管理员权限，避免权限扩散
+    rights['add_admins'] = False
+    # other 权限位（bit 15 保留位）不参与 bot 管理员权限，置 False 避免被拒
+    rights['other'] = False
+
+    return ChatAdminRights(**rights)
+
+
 async def _add_bot_to_chat(user_client, chat_entity, bot_username: str, bot_id: int):
     """用用户账号将 bot 添加为聊天管理员。
 
@@ -2456,7 +2531,7 @@ async def _add_bot_to_chat(user_client, chat_entity, bot_username: str, bot_id: 
         from telethon.tl.functions.channels import EditAdminRequest, InviteToChannelRequest
         from telethon.tl.functions.messages import AddChatUserRequest
         from telethon.tl.functions.users import GetUsersRequest
-        from telethon.tl.types import Chat, Channel, ChatAdminRights, InputUser
+        from telethon.tl.types import Chat, Channel, InputUser
 
         if bot_username:
             bot_input = await user_client.get_input_entity(bot_username)
@@ -2464,19 +2539,8 @@ async def _add_bot_to_chat(user_client, chat_entity, bot_username: str, bot_id: 
             users = await user_client(GetUsersRequest([InputUser(bot_id, 0)]))
             bot_input = await user_client.get_input_entity(users[0])
 
-        rights = ChatAdminRights(
-            post_messages=True,
-            edit_messages=True,
-            delete_messages=True,
-            invite_users=True,
-            pin_messages=True,
-            add_admins=False,
-            anonymous=False,
-            manage_call=False,
-            other=True,
-            ban_users=False,
-            change_info=False,
-        )
+        # 按用户账号实际权限动态构建 bot 权限（不能授予超过自身拥有的权限）
+        rights = await _build_bot_admin_rights(user_client, chat_entity)
 
         # 普通群组：先加入，失败（可能已在群中）忽略
         if isinstance(chat_entity, Chat):
