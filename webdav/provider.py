@@ -187,6 +187,35 @@ def _iter_media_messages(client, chat_id: int) -> List[Message]:
         return []
 
 
+class _NamedFile:
+    """给文件对象附加 str 类型 name 的代理（Telethon 需要 file.name 为字符串）。
+
+    SpooledTemporaryFile 滚动到磁盘后底层是 TemporaryFile，其 name 是
+    int（文件描述符），Telethon 会把它当文件名导致 os.path.splitext(int)
+    崩溃。本类包装后返回真实文件名，其余 IO 方法转发到底层对象。
+    """
+
+    def __init__(self, f, name):
+        self._f = f
+        self._name = str(name)
+
+    @property
+    def name(self):
+        return self._name
+
+    def seekable(self):
+        # SpooledTemporaryFile 没有 seekable 方法，但底层确实可 seek。
+        # Telethon _FileStream 靠它决定是否用 seek/tell 探测大小；
+        # 缺失会导致整文件 read() 进内存 + 复制 BytesIO（大文件内存爆炸）。
+        return True
+
+    def __getattr__(self, item):
+        return getattr(self._f, item)
+
+    def __iter__(self):
+        return iter(self._f)
+
+
 class _WriteBuffer:
     """写入缓冲区（请求体临时落盘），close 后仍可读取数据。"""
     def __init__(self):
@@ -214,10 +243,17 @@ class _WriteBuffer:
     def get_size(self):
         return self._size
 
-    def get_file(self):
-        """返回已定位到文件头的可读文件对象（供流式上传）。"""
+    def get_file(self, filename=None):
+        """返回已定位到文件头的可读文件对象（供流式上传）。
+
+        SpooledTemporaryFile 超过阈值滚动到磁盘后，底层 TemporaryFile 的
+        ``name`` 是 int（文件描述符），Telethon 会把它当文件名导致
+        ``os.path.splitext(int)`` 崩溃。这里用代理返回真实文件名。
+        """
         self._tmp.flush()
         self._tmp.seek(0)
+        if filename:
+            return _NamedFile(self._tmp, filename)
         return self._tmp
 
     def __enter__(self):
@@ -719,7 +755,7 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
             if size > BOT_API_SIZE_LIMIT:
                 logger.info(f"上传文件 {self._filename} ({size} 字节) 超过 {BOT_API_SIZE_LIMIT // 1024 // 1024}MB，直接走 Telethon")
                 try:
-                    self._upload_via_telethon(buffer.get_file(), size)
+                    self._upload_via_telethon(buffer.get_file(self._filename), size)
                 except Exception:
                     logger.error(f"端到端上传 {self._filename} 失败 (via Telethon)", exc_info=True)
                     raise
@@ -757,7 +793,7 @@ class TelegramDAVFile(dav_provider.DAVNonCollection):
                 # 如果 Bot API 请求本身异常（如文件过大），也尝试 Telethon 回退
                 logger.warning(f"Bot API 上传异常 ({e})，回退到 Telethon")
 
-            self._upload_via_telethon(buffer.get_file(), size)
+            self._upload_via_telethon(buffer.get_file(self._filename), size)
             from webdav.server import invalidate_cache
             invalidate_cache(self.chat_id)
         finally:
