@@ -2369,7 +2369,7 @@ def _get_id_variants(raw_id: str) -> list:
     return variants
 
 
-async def _check_bot_admin(client, chat_entity, bot_id: int) -> bool:
+async def _check_bot_admin(client, chat_entity, bot_id: int, chat_input: str = None) -> bool:
     """检查 bot 是否在聊天中（普通成员也算在聊天中）。"""
     from telethon.tl.types import User, Chat
     from telethon.tl.functions.channels import GetParticipantRequest
@@ -2378,10 +2378,17 @@ async def _check_bot_admin(client, chat_entity, bot_id: int) -> bool:
     if isinstance(chat_entity, User):
         return True
 
-    # 超级群组/频道：能查到参与者即表示 bot 已在聊天中。
-    # 注意：传入的实体通常是用用户账号解析的，私密频道的 access_hash 与 bot 账号
-    # 不一致，直接用会导致 GetParticipantRequest 失败。因此优先用 bot 客户端按
-    # 聊天 ID 从自身缓存解析实体，确保 access_hash 匹配 bot 账号。
+    # 优先用 bot 客户端按原始输入解析实体（如邀请链接），拿到属于 bot 账号
+    # access_hash 的频道实体，避免用户账号解析的实体因 access_hash 不匹配而误判。
+    if chat_input:
+        try:
+            bot_entity = await client.get_entity(chat_input.strip())
+            await client(GetParticipantRequest(bot_entity, bot_id))
+            return True
+        except Exception as e:
+            logger.debug(f"用原始输入检查 bot 是否在聊天中失败: {e}")
+
+    # 其次尝试按聊天 ID 从 bot 客户端自身缓存解析实体，确保 access_hash 匹配 bot 账号。
     try:
         input_chat = await client.get_input_entity(chat_entity.id)
     except Exception:
@@ -2407,6 +2414,33 @@ async def _check_bot_admin(client, chat_entity, bot_id: int) -> bool:
     return False
 
 
+async def _check_user_add_admin_rights(user_client, chat_entity):
+    """检查用户账号在聊天中是否有添加管理员的权限。
+
+    返回 (ok: bool, err_msg: str)。
+    """
+    from telethon.tl.types import Channel, ChannelParticipantCreator
+    from telethon.tl.functions.channels import GetParticipantRequest
+
+    # 普通群组/私聊：不预检，交给 EditAdminRequest 判断
+    if not isinstance(chat_entity, Channel):
+        return True, ""
+
+    try:
+        me = await user_client.get_me()
+        part = await user_client(GetParticipantRequest(chat_entity, me.id))
+        p = part.participant
+        # 创建者永远拥有全部权限
+        if isinstance(p, ChannelParticipantCreator):
+            return True, ""
+        rights = getattr(p, 'admin_rights', None)
+        if rights and rights.add_admins:
+            return True, ""
+        return False, "你的用户账号不是该频道管理员，或未开启「添加管理员」权限。请让频道主/管理员在 管理→管理员 中为你的账号开启「添加管理员」，或手动将 bot 添加为管理员后再试。"
+    except Exception as e:
+        return False, f"无法确认你的账号在该频道的权限（请确认你已加入该频道且是管理员）：{e}"
+
+
 async def _add_bot_to_chat(user_client, chat_entity, bot_username: str, bot_id: int):
     """用用户账号将 bot 添加为聊天管理员。
 
@@ -2415,6 +2449,8 @@ async def _add_bot_to_chat(user_client, chat_entity, bot_username: str, bot_id: 
 
     注意：EditAdminRequest 等请求走的是 user_client 连接，必须用用户账号解析 bot 的
     InputUser（access_hash 需对用户账号有效），不能用 bot_client 自身解析。
+
+    返回 (ok: bool, err_msg: str)。
     """
     try:
         from telethon.tl.functions.channels import EditAdminRequest, InviteToChannelRequest
@@ -2451,17 +2487,21 @@ async def _add_bot_to_chat(user_client, chat_entity, bot_username: str, bot_id: 
 
         try:
             await user_client(EditAdminRequest(chat_entity, bot_input, rights, rank=''))
-            return True
+            return True, ""
         except Exception as e:
             # 频道/超级群组：bot 还不是成员时先邀请加入再提升
             if isinstance(chat_entity, Channel) and 'USER_NOT_PARTICIPANT' in str(e):
                 await user_client(InviteToChannelRequest(chat_entity, [bot_input]))
                 await user_client(EditAdminRequest(chat_entity, bot_input, rights, rank=''))
-                return True
-            raise
+                return True, ""
+            err = str(e)
+            # 权限不足/权限组合错误，给出明确提示
+            if 'admin rights' in err.lower() or 'EDIT_ADMIN_RIGHTS' in err.upper():
+                return False, "你的账号在该聊天没有「添加管理员」权限，或权限组合不被允许（频道/群组权限不通用）。请让频道主/群主为你开启「添加管理员」权限，或手动将 bot 添加为管理员后再试。"
+            return False, err
     except Exception as e:
         logger.error(f"添加 bot 为管理员失败: {e}")
-        return False
+        return False, str(e)
 
 
 async def handle_webdav_add_command(event, command, parts):
@@ -2514,16 +2554,22 @@ async def handle_webdav_add_command(event, command, parts):
     bot_id = bot_me.id
     bot_username = bot_me.username
 
-    bot_in_chat = await _check_bot_admin(bot_client, entity, bot_id)
+    bot_in_chat = await _check_bot_admin(bot_client, entity, bot_id, chat_input)
     if not bot_in_chat:
+        # 先检查用户账号在该聊天是否有添加管理员权限
+        perm_ok, perm_err = await _check_user_add_admin_rights(user_client, entity)
+        if not perm_ok:
+            await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
+            await reply_and_delete(event, f"无法将 bot 添加到聊天 {chat_name}。\n{perm_err}")
+            return
         # 尝试用 user_client 添加 bot 为管理员
         logger.info(f"bot 不在聊天 {chat_name} 中，尝试添加为管理员...")
-        added = await _add_bot_to_chat(user_client, entity, bot_username, bot_id)
+        added, err_msg = await _add_bot_to_chat(user_client, entity, bot_username, bot_id)
         if not added:
             await async_delete_user_message(event.client, event.message.chat_id, event.message.id, 0)
             await reply_and_delete(event,
-                f"无法将 bot 添加到聊天 {chat_name}。\n"
-                f"请确保你对该聊天有添加管理员权限，或手动将 @{bot_username} 添加为管理员后再试。"
+                f"无法将 bot 添加到聊天 {chat_name}。\n{err_msg}\n"
+                f"也可手动将 @{bot_username} 添加为管理员后再试。"
             )
             return
         logger.info(f"成功将 bot 添加为 {chat_name} 的管理员")
